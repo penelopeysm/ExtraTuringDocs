@@ -10,13 +10,10 @@ The aim is for individual articles to be be merged into the actual docs when the
 ### This Quarto project was run with
 
 ```{julia}
-import Pkg; Pkg.instantiate();
-```
-
-```{julia}
 versioninfo()
 ```
 
 ```{julia}
+using Pkg
 Pkg.status(; mode=PKGMODE_MANIFEST)
 ```

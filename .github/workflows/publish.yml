@@ -24,6 +24,9 @@ jobs:
         with: 
           version: pre-release
 
+      - name: Instantiate
+        run: julia --project=. -e 'using Pkg; Pkg.instantiate(); Pkg.resolve()'
+
       - name: Render
         uses: quarto-dev/quarto-actions/render@v2
 

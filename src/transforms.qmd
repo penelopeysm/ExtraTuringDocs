@@ -4,8 +4,8 @@ engine: julia
 ---
 
 ```{julia}
-import Random; Random.seed!(468);
-import Pkg; Pkg.instantiate();
+import Random
+Random.seed!(468);
 ```
 
 This article is about transforming distributions and Bijectors.jl.
