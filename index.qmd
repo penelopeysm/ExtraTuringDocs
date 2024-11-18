@@ -18,6 +18,5 @@ versioninfo()
 ```
 
 ```{julia}
-using Pkg
 Pkg.status(; mode=PKGMODE_MANIFEST)
 ```
