@@ -1,0 +1,19 @@
+---
+title: "Extradocs"
+engine: julia
+---
+
+Extra musings about Turing.jl and probabilistic programming.
+
+The aim is for individual articles to be be merged into the actual docs when they're good enough.
+
+### This Quarto project was run with
+
+```{julia}
+versioninfo()
+```
+
+```{julia}
+using Pkg
+Pkg.status(; mode=PKGMODE_MANIFEST)
+```

@@ -1,0 +1,14 @@
+project:
+  type: book
+
+book:
+  title: "extradocs"
+  author: "Penelope Yong"
+  date: "2024-11-18"
+  chapters:
+    - index.qmd
+    - src/transforms.qmd
+
+format:
+  html:
+    theme: cosmo
