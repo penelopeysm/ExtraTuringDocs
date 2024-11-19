@@ -32,7 +32,7 @@ That's all great, and furthermore if you want to know the probability of observi
 
 The probability density function for the normal distribution with mean 0 and standard deviation 1 is
 
-$$p(x) = \frac{1}{\sqrt{2\pi}} e^{-x^2/2},$$
+$$p(x) = \frac{1}{\sqrt{2\pi}} \exp{\left(-\frac{x^2}{2}\right)},$$
 
 so we could also have calculated this manually using:
 
@@ -157,4 +157,163 @@ You can try this out with the transformation $y = -\exp(x)$: you will have to fl
 
 ## The Jacobian
 
+In general, we may have transforms that act on multivariate distributions, for example something mapping $p(x_1, x_2)$ to $q(y_1, y_2)$.
+In this case, the rule above has to be extended by replacing the derivative $\mathrm{d}x/\mathrm{d}y$ with the determinant of the Jacobian matrix:
 
+$$\mathbf{J} = \begin{pmatrix}
+\partial x_1/\partial y_1 & \partial x_1/\partial y_2 \\
+\partial x_2/\partial y_1 & \partial x_2/\partial y_2
+\end{pmatrix}.$$
+
+and specifically,
+
+$$q(y_1, y_2) = p(x_1, x_2) \left| \det(\mathbf{J}) \right|.$$
+
+This is the same as equation (11.9) in Bishop, except that he denotes the absolute value of the determinant with just $|\mathbf{J}|$.
+
+::: {.callout-note}
+In different contexts the Jacobian can have different 'numerators' and 'denominators' in the partial derivatives.
+For example, if $\mathbf{y} = f(\mathbf{x})$, then it's common to write $\mathbf{J}_f$ as a matrix of partial derivatives of elements of $y$ with respect to elements of $x$.
+(For example, $\mathbf{J}_f$ is used in [Newton's method](https://en.wikipedia.org/wiki/Newton%27s_method) to find the zeroes of $f$, i.e. the values of $\mathbf{x}$ such that $\mathbf{y} = \mathbf{0}$.)
+However, it is always the case that the elements of the 'numerator' vary with rows and the elements of the 'denominator' vary with columns.
+:::
+
+The rest of this section will be devoted to an example to show that this works, and contains some slightly less pretty mathematics.
+If you are already suitably convinced by this stage, then you can skip the rest of this section.
+(Or if you prefer something more formal, the Wikipedia article on integration by substitution [discusses the multivariate case as well](https://en.wikipedia.org/wiki/Integration_by_substitution#Substitution_for_multiple_variables).)
+
+### An example: the Box–Muller transform
+
+A motivating example where one might like to use a Jacobian is the [Box–Muller transform](https://en.wikipedia.org/wiki/Box%E2%80%93Muller_transform), which is a technique for sampling from a normal distribution.
+
+The Box–Muller transform works by first sampling two random variables from the uniform distribution between 0 and 1:
+
+$$\begin{align}
+x_1 &\sim U(0, 1) \\
+x_2 &\sim U(0, 1).
+\end{align}$$
+
+Both of these have a probability density function of $p(x) = 1$ for $0 < x \leq 1$, and 0 otherwise.
+Because they are independent, we can write that
+
+$$p(x_1, x_2) = p(x_1) p(x_2) = \begin{cases}
+1 & \text{if } 0 < x_1 \leq 1 \text{ and } 0 < x_2 \leq 1, \\
+0 & \text{otherwise}.
+\end{cases}$$
+
+The next step is to perform the transforms
+
+$$\begin{align}
+y_1 &= \sqrt{-2 \log(x_1)} \cos(2\pi x_2); \\
+y_2 &= \sqrt{-2 \log(x_1)} \sin(2\pi x_2),
+\end{align}$$
+
+and it turns out that with these transforms, both $y_1$ and $y_2$ are independent and normally distributed with mean 0 and standard deviation 1, i.e.
+
+$$q(y_1, y_2) = \frac{1}{2\pi} \exp{\left(-\frac{y_1^2}{2}\right)} \exp{\left(-\frac{y_2^2}{2}\right)}.$$
+
+How can we show that this is the case?
+
+There are many ways to work out the required calculus.
+Some are more elegant and some rather less so!
+One of the less headache-inducing ways is to define the intermediate variables:
+
+$$r = \sqrt{-2 \log(x_1)}; \quad \theta = 2\pi x_2,$$
+
+from which we can see that $y_1 = r\cos\theta$ and $y_2 = r\sin\theta$, and hence
+
+$$\begin{align}
+x_1 &= \exp{\left(-\frac{r^2}{2}\right)} = \exp{\left(-\frac{y_1^2}{2}\right)}\exp{\left(-\frac{y_2^2}{2}\right)}; \\
+x_2 &= \frac{\theta}{2\pi} = \frac{1}{2\pi} \, \arctan\left(\frac{y_2}{y_1}\right).
+\end{align}$$
+
+This lets us obtain the requisite partial derivatives in a way that doesn't involve _too_ much algebra.
+As an example, we have
+
+$$\frac{\partial x_1}{\partial y_1} = -y_1 \exp{\left(-\frac{y_1^2}{2}\right)}\exp{\left(-\frac{y_2^2}{2}\right)} = -y_1 x_1,$$
+
+(where we used the product rule), and
+
+$$\frac{\partial x_2}{\partial y_1} = \frac{1}{2\pi} \left(\frac{1}{1 + (y_2/y_1)^2}\right) \left(-\frac{y_2}{y_1^2}\right),$$
+
+(where we used the chain rule, and the derivative $\mathrm{d}(\arctan(a))/\mathrm{d}a = 1/(1 + a^2)$).
+
+Putting together the Jacobian matrix, we have:
+
+$$\mathbf{J} = \begin{pmatrix}
+-y_1 x_1 & -y_2 x_1 \\
+-cy_2/y_1^2 & c/y_1 \\
+\end{pmatrix},$$
+
+where $c = [2\pi(1 + (y_2/y_1)^2)]^{-1}$.
+The determinant of this matrix is
+
+$$\begin{align}
+\det(\mathbf{J}) &= -cx_1 - cx_1(y_2/y_1)^2 \\
+&= -cx_1\left[1 + \left(\frac{y_2}{y_1}\right)^2\right] \\
+&= -\frac{1}{2\pi} x_1 \\
+&= -\frac{1}{2\pi}\exp{\left(-\frac{y_1^2}{2}\right)}\exp{\left(-\frac{y_2^2}{2}\right)},
+\end{align}$$
+
+Coming right back to our probability density, we have that
+
+$$\begin{align}
+q(y_1, y_2) &= p(x_1, x_2) \cdot |\det(\mathbf{J})| \\
+&= \frac{1}{2\pi}\exp{\left(-\frac{y_1^2}{2}\right)}\exp{\left(-\frac{y_2^2}{2}\right)},
+\end{align}$$
+
+as desired.
+
+::: {.callout-note}
+We haven't yet explicitly accounted for the fact that $p(x_1, x_2)$ is 0 if either $x_1$ or $x_2$ are outside the range $(0, 1]$.
+For example, if this constraint on $x_1$ and $x_2$ were to result in inaccessible values of $y_1$ or $y_2$, then $q(y_1, y_2)$ should be 0 for those values.
+Formally, for the transformation $f: X \to Y$ where $X$ is the unit square (i.e. $0 < x_1, x_2 \leq 1$), $q(y_1, y_2)$ should only take the above value for the [image](https://en.wikipedia.org/wiki/Image_(mathematics)) of $f$, and anywhere outside of the image it should be 0.
+
+In our case, the $\log(x_1)$ term in the transform varies between 0 and $\infty$, and the $\cos(2\pi x_2)$ term ranges from $-1$ to $1$.
+Hence $y_1$, which is the product of these two terms, ranges from $-\infty$ to $\infty$, and likewise for $y_2$.
+So the image of $f$ is the entire real plane, and we don't have to worry about this.
+:::
+
+
+## Bijectors.jl
+
+All the above has purely been a mathematical discussion of how distributions can be transformed.
+Now, we turn to their implementation in Julia, specifically using the [Bijectors.jl package](https://github.com/TuringLang/Bijectors.jl).
+
+A _bijection_ between two sets ([Wikipedia](https://en.wikipedia.org/wiki/Bijection)) is, essentially, a one-to-one mapping between the elements of these sets.
+That is to say, if we have two sets $X$ and $Y$, then a bijection maps each element of $X$ to a unique element of $Y$.
+To return to our univariate example, where we transformed $x$ to $y$ using $y = \exp(x)$, the exponentiation function is a bijection because every value of $x$ maps to one unique value of $y$.
+The input set (the domain) is $(-\infty, \infty)$, and the output set (the codomain) is $(0, \infty)$.
+
+Since bijections are a one-to-one mapping between elements, we can also reverse the direction of this mapping to create an inverse function. 
+In the case of $y = \exp(x)$, the inverse function is $x = \log(y)$.
+
+::: {.callout-note}
+Technically, Bijectors.jl is concerned with functions $f: X \to Y$ for which:
+
+ - $f$ is continuously differentiable, i.e. the derivative $\mathrm{d}f(x)/\mathrm{d}x$ exists and is continuous (over the domain of interest $X$);
+- If $f^{-1}: Y \to X$ is the inverse of $f$, then that is also continuously differentiable (over _its_ own domain, i.e. $Y$).
+
+These are called diffeomorphisms ([Wikipedia](https://en.wikipedia.org/wiki/Diffeomorphism)).
+
+When thinking about continuous differentiability, it's important to be conscious of the domains or codomains that we care about.
+For example, taking the inverse function $\log(y)$ from above, its derivative is $1/y$, which is not continuous at $y = 0$.
+However, we specified that the bijection $y = \exp(x)$ maps values of $x \in (-\infty, \infty)$ to $y \in (0, \infty)$, so the point $y = 0$ is not within the domain of the inverse function.
+:::
+
+It's still unclear to me how the term biject**or** was adopted over biject**ion**, which is the common mathematical term.
+As far as I can tell, it's only used in this specific context of transforming distributions.
+
+TODO: describe and illustrate API of Bijectors
+
+Maybe TODO: describe how logabsdetjac is calculated (or can be calculated) via AD
+
+## Why is this useful for sampling anyway?
+
+Constrained vs unconstrained variables, sampling, etc.
+
+## How does DynamicPPL use bijectors?
+
+link, invlink, transform, varinfo etc.
+
+See [https://turinglang.org/DynamicPPL.jl/stable/internals/transformations/](https://turinglang.org/DynamicPPL.jl/stable/internals/transformations/)
