@@ -421,7 +421,7 @@ For example, `logpdf_with_trans` can directly give us $\log(q(\mathbf{y}))$:
 B.logpdf_with_trans(LogNormal(), x, true)
 ```
 
-## Why is this useful for sampling anyway?
+## The need for bijectors in MCMC
 
 Constraints pose a problem for pretty much any kind of numerical method, and sampling is no exception to this.
 The problem is that for any value $x$ outside of the support of a constrained distribution, $p(x)$ will be zero, and the logpdf will be $-\infty$.
@@ -432,7 +432,7 @@ This post is already really long, and does not have quite enough space to explai
 If you need more information on these, please read e.g. chapter 11 of Bishop.
 :::
 
-### Metropolis–Hastings... fine?
+### Metropolis–Hastings: fine?
 
 This alone is not enough to cause issues for Metropolis–Hastings.
 Here's an extremely barebones implementation of a random walk Metropolis algorithm:
@@ -474,13 +474,14 @@ histogram(samples_with_mh, bins=0:0.1:5; xlims=(0, 5))
 ```
 
 In this MH implementation, the only place where $p(x)$ comes into play is in the acceptance probability.
-Since we make sure to start the sampling at a point within the support of the distribution, `p(x)` will be nonzero.
 
-If the proposal step causes `x_proposal` to be outside the support, then `p(x_proposal)` will be zero, and the acceptance probability (`p(x_proposal)/p(x)`) will be zero.
+As long as we make sure to start the sampling at a point within the support of the distribution, `p(x)` will be nonzero.
+If the proposal step generates an `x_proposal` that is outside the support, `p(x_proposal)` will be zero, and the acceptance probability (`p(x_proposal)/p(x)`) will be zero.
 So such a step will never be accepted, and the sampler will continue to stay within the support of the distribution.
+
 Although this does mean that we may find ourselves having a higher reject rate than usual, and thus less efficient sampling, it at least does not cause the algorithm to become unstable or crash.
 
-### Hamiltonian Monte Carlo... not so fine
+### Hamiltonian Monte Carlo: not so fine
 
 The _real_ problem comes with gradient-based methods like Hamiltonian Monte Carlo (HMC).
 Here's an equally barebones implementation of HMC.
@@ -582,48 +583,112 @@ z += timestep * r               #  (2)
 r -= (timestep / 2) * dEdz(z)   #  (3)
 ```
 
-Here, `z` is the position.
+Here, `z` is the position and `r` the momentum.
 Since we start our sampler inside the support of the distribution (by supplying a good initial point), `dEdz(z)` will start off being well-defined on line (1).
 However, after `r` is updated on line (1), `z` is updated again on line (2), and _this_ value of `z` may well be outside of the support.
 At this point, `dEdz(z)` will be `NaN`, and the final update to `r` on line (3) will also cause it to be `NaN`.
 
 Even if we're lucky enough for an individual integration step to not move `z` outside the support, there are many integration steps per sampler step, and many sampler steps, and so the chances of this happening at some point are quite high.
 
-It's possible to choose your integration parameters carefully to reduce the risk of this happening.
+It's possible to choose our integration parameters carefully to reduce the risk of this happening.
 For example, we could set the integration timestep to be _really_ small, thus reducing the chance of making a move outside the support.
 But that will just lead to a very slow exploration of parameter space, and in general, we should like to avoid this problem altogether.
 
 ### Rescuing HMC
 
 Perhaps unsurprisingly, the answer to this is to transform the underlying distribution to an unconstrained one and sample from that instead.
-However, to preserve the correct behaviour, we have to make sure that we include the pesky Jacobian term when sampling from the transformed distribution.
-Bijectors.jl can do all of this for us.
+However, we have to make sure that we include the pesky Jacobian term when sampling from the transformed distribution.
+That's where Bijectors.jl can come in.
 
-The main thing we need to do is to pass a modified version of the function `p` to our HMC sampler.
-Recall the problem is that our `p` is zero outside the support of the distribution.
-What we can do is to instead specify `p` as the pdf of our transformed distribution, evaluated at the transformed value of `x` (which we'll call `y`).
+The main change we need to make is to pass a modified version of the function `p` to our HMC sampler.
+Recall back at the very start, we transformed $p(x)$ into $q(y)$, and said that
+
+$$q(y) = p(x) \left| \frac{\mathrm{d}x}{\mathrm{d}y} \right|.$$
+
+What we want the HMC sampler to see is the transformed distribution $q(y)$, not the original distribution $p(x)$.
+And Bijectors.jl lets us calculate $\log(q(y))$ using `logpdf_with_trans(p, x, true)`:
 
 ```{julia}
 d = LogNormal()
-# Calling pdf() on a transformed distribution automatically includes
-# the Jacobian term
-p_transformed(y) = pdf(B.transformed(d), y)
-# These definitions are the same as before
-E(z) = -log(p_transformed(z))
+f = B.bijector(d)     # Transformation function
+f_inv = B.inverse(f)  # Inverse transformation function
+
+function logq(y)
+    x = f_inv(y)
+    return B.logpdf_with_trans(d, x, true)
+end
+# These definitions are the same as before, except that
+# the call to `log` has been moved up into logq rather
+# than in E.
+E(z) = -logq(z)
 dEdz(z) = ForwardDiff.derivative(E, z)
 ```
 
-When we run HMC on this, it will give us back samples of `y`, not `x`.
-So we can untransform them, and voilà, our HMC sampler works again!
+The `exp`/`log` wrapping is a bit awkward.
+In practice we would only ever work on the log scale, but
+
+Now, because our transformed distribution is unconstrained, we can evaluate `E` and `dEdz` at any point, and sample with more confidence:
 
 ```{julia}
 samples_with_hmc = hmc(1.0, E, dEdz, 5000)
+samples_with_hmc[1:5]
+```
 
-bijector = B.bijector(d)
-samples_with_hmc_untransformed = B.inverse(bijector)(samples_with_hmc)
+No sampling errors this time... yay!
+We have to remember that when we run HMC on this, it will give us back samples of `y`, not `x`.
+So we can untransform them:
+
+```{julia}
+samples_with_hmc_untransformed = f_inv(samples_with_hmc)
 histogram(samples_with_hmc_untransformed, bins=0:0.1:5; xlims=(0, 5))
 ```
 
+We can also check that the mean and variance of the samples are what we expect them to be.
+From [Wikipedia](https://en.wikipedia.org/wiki/Log-normal_distribution), the mean and variance of a log-normal distribution are respectively $\exp(\mu + \sigma^2/2)$ and $[\exp(\sigma^2) - 1]\exp(2\mu + \sigma^2)$.
+For our log-normal distribution, we set $\mu = 0$ and $\sigma = 1$, so the mean and variance should be $1.6487$ and $4.6707$ respectively.
+
+```{julia}
+println("    mean : $(mean(samples_with_hmc_untransformed))")
+println("variance : $(var(samples_with_hmc_untransformed))")
+```
+
+::: {.callout-note}
+You might notice that the variance is a little bit off.
+The truth is that it's actually quite tricky to get an accurate variance when sampling from a log-normal distribution.
+You can see this even with Turing.jl itself:
+
+```{julia}
+using Turing
+setprogress!(false)
+@model ln() = x ~ LogNormal()
+chain = sample(ln(), HMC(0.2, 3), 5000)
+(mean(chain[:x]), var(chain[:x]))
+```
+:::
+
+The importance of the Jacobian term here isn't to enable sampling _per se_.
+Because the resulting distribution is unconstrained, we could have still sampled from it without using the Jacobian.
+However, adding the Jacobian is what ensures that when we un-transform the samples, we get the correct distribution.
+
+This is what happens if we don't include the Jacobian term.
+In this `logq_wrong`, we've un-transformed `y` to `x` and calculated the logpdf with respect to its original distribution.
+This is exactly the same mistake that we made at the start of this article with `naive_logpdf`.
+
+```{julia}
+function logq_wrong(y)
+    x = f_inv(y)
+    return logpdf(d, x)
+end
+E(z) = -logq_wrong(z)
+dEdz(z) = ForwardDiff.derivative(E, z)
+samples_questionable = hmc(1.0, E, dEdz, 5000)
+samples_questionable_untransformed = f_inv(samples_questionable)
+
+println("    mean : $(mean(samples_questionable_untransformed))")
+println("variance : $(var(samples_questionable_untransformed))")
+```
+
+You can see that even though the sampling ran fine without errors, the summary statistics are completely wrong.
 
 ## How does DynamicPPL use bijectors?
 
