@@ -47,11 +47,12 @@ log(1 / sqrt(2π) * exp(-samples[1]^2 / 2))
 
 ## Sampling from a transformed distribution
 
-Now say that $x$ is distributed according to `Normal()`, and we want to draw samples from $y = \exp(x)$.
-The distribution of $y$ is known as a [log-normal distribution](https://en.wikipedia.org/wiki/Log-normal_distribution).
+Say that $x$ is distributed according to `Normal()`, and we want to draw samples of $y = \exp(x)$.
+Now, $y$ is itself a random variable, and like any other random variable, will have a probability distribution, which we'll call $q(y)$.
 
-For illustration purposes, let's make our own `MyLogNormal` distribution that we can sample from: see Distribution.jl's documentation on custom distributions [here](https://juliastats.org/Distributions.jl/stable/extends/#Univariate-Distribution).
-(Distributions already defines its own `LogNormal`, so we have to use a different name.)
+In this specific case, the distribution of $y$ is known as a [log-normal distribution](https://en.wikipedia.org/wiki/Log-normal_distribution).
+For illustration purposes, let's try to implement our own `MyLogNormal` distribution that we can sample from.
+(Distributions.jl already defines its own `LogNormal`, so we have to use a different name.)
 
 ```{julia}
 struct MyLogNormal <: ContinuousUnivariateDistribution
@@ -63,41 +64,44 @@ MyLogNormal() = MyLogNormal(0.0, 1.0)
 Base.rand(rng::Random.AbstractRNG, d::MyLogNormal) = exp(rand(rng, Normal(d.μ, d.σ)))
 ```
 
-Great, now we can do the same as above:
+Now we can do the same as above:
 
 ```{julia}
 samples_lognormal = rand(MyLogNormal(), 5000)
-# Cut off the tail for clearer visualization
+# Cut off the tail for clearer visualisation
 histogram(samples_lognormal, bins=0:0.1:5; xlims=(0, 5))
 ```
 
 How do we implement `logpdf` for our new distribution, though?
+Or in other words, if we observe a sample $y$, how do we know what the probability of drawing that sample was?
 
-Naively, we might think to just un-transform the variable `y`, and then use the `logpdf` of the normal distribution.
+Naively, we might think to just un-transform the variable `y` by reversing the exponential, i.e. taking the logarithm
+We could then use the `logpdf` of the original distribution of `x`.
 
 ```{julia}
-bad_logpdf(d::MyLogNormal, y) = logpdf(Normal(d.μ, d.σ), log(y))
+naive_logpdf(d::MyLogNormal, y) = logpdf(Normal(d.μ, d.σ), log(y))
 ```
 
-We can compare this function against the logpdf implemented in Distributions.jl.
-(The name chosen here certainly foreshadows that it's not going to be correct, though!)
+We can compare this function against the logpdf implemented in Distributions.jl:
 
 ```{julia}
 println("Sample   : $(samples_lognormal[1])")
 println("Expected : $(logpdf(LogNormal(), samples_lognormal[1]))")
-println("Actual   : $(bad_logpdf(MyLogNormal(), samples_lognormal[1]))")
+println("Actual   : $(naive_logpdf(MyLogNormal(), samples_lognormal[1]))")
 ```
+
+Clearly this approach is not quite correct!
 
 ## The derivative
 
 Fundamentally, the reason why this doesn't work is because transforming a (continuous) distribution causes probability density to be stretched and otherwise moved around.
 
 ::: {.callout-note}
-There are various posts on the Internet that explain this visually; I'm too lazy to draw a diagram _right now_, but I might do it later.
+There are various posts on the Internet that explain this visually.
 :::
 
-I personally find it most useful to not talk about probability density itself, but instead to make it more concrete by talking about actual probabilities.
-If we think about the normal distribution as a continuous curve, what the probability density function $p(x)$ really tells us is that for any two points $a$ and $b$ (where $a \leq b$), the probability of drawing a sample from the interval $[a, b]$ is the area under the curve, i.e.
+A perhaps useful approach is to not talk about _probability densities_, but instead to make it more concrete by talking about actual _probabilities_.
+If we think about the normal distribution as a continuous curve, what the probability density function $p(x)$ really tells us is that: for any two points $a$ and $b$ (where $a \leq b$), the probability of drawing a sample between $a$ and $b$ is the corresponding area under the curve, i.e.
 
 $$\int_a^b p(x) \, \mathrm{d}x.$$
 
@@ -123,10 +127,10 @@ $$\int_{x=a}^{x=b} p(x) \, \mathrm{d}x
 
 from which we can read off $q(y) = p(\log(y)) / y$.
 
-In contrast, when we implemented `bad_logpdf`
+In contrast, when we implemented `naive_logpdf`
 
 ```{julia}
-bad_logpdf(d::MyLogNormal, y) = logpdf(Normal(d.μ, d.σ), log(y))
+naive_logpdf(d::MyLogNormal, y) = logpdf(Normal(d.μ, d.σ), log(y))
 ```
 
 that was the equivalent of saying that $q(y) = p(\log(y))$.
@@ -177,12 +181,19 @@ $$q(y_1, y_2) = p(x_1, x_2) \left| \det(\mathcal{J}) \right|.$$
 
 This is the same as equation (11.9) in Bishop, except that he denotes the absolute value of the determinant with just $|\mathcal{J}|$.
 
-::: {.callout-note}
-In different contexts the Jacobian can have different 'numerators' and 'denominators' in the partial derivatives.
-For example, if $\mathbf{y} = f(\mathbf{x})$, then it's common to write $\mathbf{J}$ as a matrix of partial derivatives of elements of $y$ with respect to elements of $x$.
-Indeed, later in this article we will see that Bijectors.jl uses this convention.
+::: {.callout-important}
+Note that, if we have a function $f$ mapping $\mathbf{x}$ to $\mathbf{y}$, then the Jacobian matrix $\mathbf{J}$ (sometimes denoted $\mathbf{J}_f$) is usually defined _the other way round_:
 
-It is always the case, though, that the elements of the 'numerator' vary with rows and the elements of the 'denominator' vary with columns.
+$$\mathbf{J} = \begin{pmatrix}
+\partial y_1/\partial x_1 & \partial y_1/\partial x_2 \\
+\partial y_2/\partial x_1 & \partial y_2/\partial x_2
+\end{pmatrix}.$$
+
+Indeed, later in this article we will see that Bijectors.jl uses this convention.
+This is why we have denoted this 'inverse' Jacobian as $\mathcal{J}$, rather than $\mathbf{J}$.
+
+$\mathcal{J}$ is really the Jacobian of the inverse function $f^{-1}$.
+As it turns out, the matrix $\mathcal{J}$ is also the inverse of $\mathbf{J}$.
 :::
 
 The rest of this section will be devoted to an example to show that this works, and contains some slightly less pretty mathematics.
@@ -301,19 +312,17 @@ Technically, the bijections in Bijectors.jl are functions $f: X \to Y$ for which
  - $f$ is continuously differentiable, i.e. the derivative $\mathrm{d}f(x)/\mathrm{d}x$ exists and is continuous (over the domain of interest $X$);
 - If $f^{-1}: Y \to X$ is the inverse of $f$, then that is also continuously differentiable (over _its_ own domain, i.e. $Y$).
 
-These are called diffeomorphisms ([Wikipedia](https://en.wikipedia.org/wiki/Diffeomorphism)).
+The technical mathematical term for this is a diffeomorphism ([Wikipedia](https://en.wikipedia.org/wiki/Diffeomorphism)), but we call them 'bijectors'.
 
 When thinking about continuous differentiability, it's important to be conscious of the domains or codomains that we care about.
 For example, taking the inverse function $\log(y)$ from above, its derivative is $1/y$, which is not continuous at $y = 0$.
 However, we specified that the bijection $y = \exp(x)$ maps values of $x \in (-\infty, \infty)$ to $y \in (0, \infty)$, so the point $y = 0$ is not within the domain of the inverse function.
 :::
 
-It's not entirely clear to me who first coined the term biject**or** (as opposed to biject**ion**), which is the mathematical term.
-As far as I can tell, it's only used in this specific context of transforming probability distributions, and apart from Bijectors.jl itself, it is also used in [the TensorFlow deep learning framework](https://www.tensorflow.org/probability/api_docs/python/tfp/bijectors).
-
 Specifically, one of the primary purposes of Bijectors.jl is used to construct _bijections which map constrained distributions to unconstrained ones_.
-For example, the log-normal distribution which we saw above is constrained: its _support_, i.e. the range over which $p(x) \geq 0$, is (0, $\infty$).
+For example, the log-normal distribution which we saw above is constrained: its _support_, i.e. the range over which $p(x) \geq 0$, is $(0, \infty)$.
 However, we can transform that to an unconstrained distribution (the normal distribution) using the transformation $y = \log(x)$.
+
 The `bijector` function, when applied to a distribution, returns a bijection $f$ that can be used to map the constrained distribution to an unconstrained one.
 
 ```{julia}
@@ -414,10 +423,219 @@ B.logpdf_with_trans(LogNormal(), x, true)
 
 ## Why is this useful for sampling anyway?
 
-Constrained vs unconstrained variables, sampling, etc.
+Constraints pose a problem for pretty much any kind of numerical method, and sampling is no exception to this.
+The problem is that for any value $x$ outside of the support of a constrained distribution, $p(x)$ will be zero, and the logpdf will be $-\infty$.
+Thus, any term that involves some ratio of probabilities (or equivalently, the logpdf)  will be infinite.
+
+::: {.callout-note}
+This post is already really long, and does not have quite enough space to explain either the Metropolis–Hastings or Hamiltonian Monte Carlo algorithms in detail.
+If you need more information on these, please read e.g. chapter 11 of Bishop.
+:::
+
+### Metropolis–Hastings... fine?
+
+This alone is not enough to cause issues for Metropolis–Hastings.
+Here's an extremely barebones implementation of a random walk Metropolis algorithm:
+
+```{julia}
+# Take a step where the proposal is a normal distribution centred around
+# the current value
+function mh_step(p, x)
+    x_proposed = rand(Normal(x, 1))
+    acceptance_prob = min(1, p(x_proposed) / p(x))
+    return if rand() < acceptance_prob
+        x_proposed
+    else
+        x
+    end
+end
+
+# Run a random walk Metropolis sampler.
+# `p`  : a function that takes `x` and returns the pdf of the distribution
+#        we're trying to sample from
+# `x0` : the initial state
+function mh(p, x0, n_samples)
+    samples = []
+    x = x0
+    for _ in 2:n_samples
+        x = mh_step(p, x)
+        push!(samples, x)
+    end
+    return samples
+end
+```
+
+With this we can sample from a log-normal distribution just fine:
+
+```{julia}
+p(x) = pdf(LogNormal(), x)
+samples_with_mh = mh(p, 1.0, 5000)
+histogram(samples_with_mh, bins=0:0.1:5; xlims=(0, 5))
+```
+
+In this MH implementation, the only place where $p(x)$ comes into play is in the acceptance probability.
+Since we make sure to start the sampling at a point within the support of the distribution, `p(x)` will be nonzero.
+
+If the proposal step causes `x_proposal` to be outside the support, then `p(x_proposal)` will be zero, and the acceptance probability (`p(x_proposal)/p(x)`) will be zero.
+So such a step will never be accepted, and the sampler will continue to stay within the support of the distribution.
+Although this does mean that we may find ourselves having a higher reject rate than usual, and thus less efficient sampling, it at least does not cause the algorithm to become unstable or crash.
+
+### Hamiltonian Monte Carlo... not so fine
+
+The _real_ problem comes with gradient-based methods like Hamiltonian Monte Carlo (HMC).
+Here's an equally barebones implementation of HMC.
+
+```{julia}
+using LinearAlgebra: I
+import ForwardDiff
+
+# Really basic leapfrog integrator.
+# `z`        : position
+# `r`        : momentum
+# `timestep` : size of one integration step
+# `nsteps`   : number of integration steps
+# `dEdz`     : function that returns the derivative of the energy with respect
+#              to `z`. The energy is the negative logpdf of the distribution
+#              we're trying to sample from.
+function leapfrog(z, r, timestep, nsteps, dEdz)
+    function step_inner(z, r)
+        # One small step for r, one giant leap for z
+        r -= (timestep / 2) * dEdz(z)
+        z += timestep * r
+        # (and then one more small step for r)
+        r -= (timestep / 2) * dEdz(z)
+        return (z, r)
+    end
+    for _ in 1:nsteps
+        z, r = step_inner(z, r)
+    end
+    (isnan(z) || isnan(r)) && error("Numerical instability encountered in leapfrog")
+    return (z, -r)
+end
+
+# Take one HMC step.
+# `z` : current position
+# `E` : function that returns the energy (negative logpdf) at `z`
+# Other arguments are as above
+function hmc_step(z, E, dEdz, integ_timestep, integ_nsteps)
+    # Generate new momentum
+    r = randn()
+    # Integrate the Hamiltonian dynamics
+    z_new, r_new = leapfrog(z, r, integ_timestep, integ_nsteps, dEdz)
+    # Calculate Hamiltonian
+    H = E(z) + 0.5 * sum(r .^ 2)
+    H_new = E(z_new) + 0.5 * sum(r_new .^ 2)
+    # Acceptance criterion
+    accept_prob = min(1, exp(H - H_new))
+    return if rand() < accept_prob
+        z_new
+    else
+        z
+    end
+end
+
+# Run HMC.
+# `z0` : initial position
+# Other arguments are as above
+function hmc(z0, E, dEdz, nsteps; integ_timestep=0.1, integ_nsteps=100)
+    samples = [z0]
+    z = z0
+    for _ in 2:nsteps
+        z = hmc_step(z, E, dEdz, integ_timestep, integ_nsteps)
+        push!(samples, z)
+    end
+    return samples
+end
+```
+
+Okay, that's our HMC set up.
+Now, let's try to sample from a log-normal distribution:
+
+```{julia}
+#| error: true
+p(x) = pdf(LogNormal(), x)
+E(x) = -log(p(x))
+dEdz(x) = ForwardDiff.derivative(E, x)
+samples_with_hmc = hmc(1.0, E, dEdz, 5000)
+histogram(samples_with_hmc, bins=0:0.1:5; xlims=(0, 5))
+```
+
+Eeeek! What happened?
+It turns out that evaluating the gradient of the energy at any point outside the support of the distribution is not possible:
+
+```{julia}
+dEdz(-1)
+```
+
+This is because $p(x)$ is 0, and hence $E(x) = -\log(p(x))$ is $\infty$ outside the support.
+If we try to evaluate the gradient at such a point, it's simply undefined, because arithmetic on infinity doesn't make sense:
+
+```{julia}
+Inf - Inf
+```
+
+To really pinpoint where this is happening, we need to look into the HMC leapfrog integration, specifically these lines:
+
+```julia
+r -= (timestep / 2) * dEdz(z)   #  (1)
+z += timestep * r               #  (2)
+r -= (timestep / 2) * dEdz(z)   #  (3)
+```
+
+Here, `z` is the position.
+Since we start our sampler inside the support of the distribution (by supplying a good initial point), `dEdz(z)` will start off being well-defined on line (1).
+However, after `r` is updated on line (1), `z` is updated again on line (2), and _this_ value of `z` may well be outside of the support.
+At this point, `dEdz(z)` will be `NaN`, and the final update to `r` on line (3) will also cause it to be `NaN`.
+
+Even if we're lucky enough for an individual integration step to not move `z` outside the support, there are many integration steps per sampler step, and many sampler steps, and so the chances of this happening at some point are quite high.
+
+It's possible to choose your integration parameters carefully to reduce the risk of this happening.
+For example, we could set the integration timestep to be _really_ small, thus reducing the chance of making a move outside the support.
+But that will just lead to a very slow exploration of parameter space, and in general, we should like to avoid this problem altogether.
+
+### Rescuing HMC
+
+Perhaps unsurprisingly, the answer to this is to transform the underlying distribution to an unconstrained one and sample from that instead.
+However, to preserve the correct behaviour, we have to make sure that we include the pesky Jacobian term when sampling from the transformed distribution.
+Bijectors.jl can do all of this for us.
+
+The main thing we need to do is to pass a modified version of the function `p` to our HMC sampler.
+Recall the problem is that our `p` is zero outside the support of the distribution.
+What we can do is to instead specify `p` as the pdf of our transformed distribution, evaluated at the transformed value of `x` (which we'll call `y`).
+
+```{julia}
+d = LogNormal()
+# Calling pdf() on a transformed distribution automatically includes
+# the Jacobian term
+p_transformed(y) = pdf(B.transformed(d), y)
+# These definitions are the same as before
+E(z) = -log(p_transformed(z))
+dEdz(z) = ForwardDiff.derivative(E, z)
+```
+
+When we run HMC on this, it will give us back samples of `y`, not `x`.
+So we can untransform them, and voilà, our HMC sampler works again!
+
+```{julia}
+samples_with_hmc = hmc(1.0, E, dEdz, 5000)
+
+bijector = B.bijector(d)
+samples_with_hmc_untransformed = B.inverse(bijector)(samples_with_hmc)
+histogram(samples_with_hmc_untransformed, bins=0:0.1:5; xlims=(0, 5))
+```
+
 
 ## How does DynamicPPL use bijectors?
 
-link, invlink, transform, varinfo etc.
+In the final section of this article, we'll discuss the higher-level implications of constrained distributions in the Turing.jl framework.
+
+When we are performing Bayesian inference, we're trying to sample from a joint probability distribution, which isn't usually a single, well-defined distribution like in the rather simplified example above.
+However, each random variable in the model will have its own distribution, and often some of these will be constrained.
+For example, if `b ~ LogNormal()` is a random variable in a model, then $p(b)$ will be zero for any $b \leq 0$.
+Consequently, any joint probability $p(b, c, \ldots)$ will also be zero for any combination of parameters where $b \leq 0$, and so that joint distribution is itself constrained.
+
+TODO: Talk about varinfo internals here I think.
+It's all in `src/abstract_varinfo.jl`.
+Unfortunately I probably need another few more days (at least) to understand this properly.
 
 See [https://turinglang.org/DynamicPPL.jl/stable/internals/transformations/](https://turinglang.org/DynamicPPL.jl/stable/internals/transformations/)
