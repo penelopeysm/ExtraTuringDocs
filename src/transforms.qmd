@@ -699,8 +699,144 @@ However, each random variable in the model will have its own distribution, and o
 For example, if `b ~ LogNormal()` is a random variable in a model, then $p(b)$ will be zero for any $b \leq 0$.
 Consequently, any joint probability $p(b, c, \ldots)$ will also be zero for any combination of parameters where $b \leq 0$, and so that joint distribution is itself constrained.
 
-TODO: Talk about varinfo internals here I think.
-It's all in `src/abstract_varinfo.jl`.
-Unfortunately I probably need another few more days (at least) to understand this properly.
+To get around this, DynamicPPL allows the variables to be transformed in exactly the same way as above.
+For simplicity, consider the following model:
 
-See [https://turinglang.org/DynamicPPL.jl/stable/internals/transformations/](https://turinglang.org/DynamicPPL.jl/stable/internals/transformations/)
+```{julia}
+using DynamicPPL
+
+@model function demo()
+    x ~ LogNormal()
+end
+
+model = demo()
+vi = VarInfo(model)
+vn_x = @varname(x)
+# Retrieve the 'internal' value of x – we'll explain this later
+DynamicPPL.getindex_internal(vi, vn_x)
+```
+
+The call to `VarInfo` executes the model once and stores the sampled value inside `vi`.
+By default, `VarInfo` itself stores un-transformed values.
+We can see this by comparing the value of the logpdf stored inside the `VarInfo`:
+
+```{julia}
+DynamicPPL.getlogp(vi)
+```
+
+with a manual calculation:
+
+```{julia}
+logpdf(LogNormal(), DynamicPPL.getindex_internal(vi, vn_x))
+```
+
+In DynamicPPL, the `link!!` function can be used to transform the variables.
+These functions do three things: firstly, they transform the variables; secondly, they update the value of logp (by adding the Jacobian term); and thirdly, they set a flag on the variables to indicate that it has been transformed.
+Note that these functions act on _all_ variables in the model, including unconstrained ones.
+(Unconstrained variables just have an identity transformation.)
+
+```{julia}
+DynamicPPL.link!!(vi, model)
+println("Transformed value: $(DynamicPPL.getindex_internal(vi, vn_x))")
+println("Transformed logp: $(DynamicPPL.getlogp(vi))")
+println("Transformed flag: $(DynamicPPL.istrans(vi, vn_x))")
+```
+
+Indeed, we can see that the new logp value matches with
+
+```{julia}
+logpdf(Normal(), DynamicPPL.getindex_internal(vi, vn_x))
+```
+
+The reverse transformation, `invlink!!`, reverts all of the above steps:
+
+```{julia}
+DynamicPPL.invlink!!(vi, model)
+println("Un-transformed value: $(DynamicPPL.getindex_internal(vi, vn_x))")
+println("Un-transformed logp: $(DynamicPPL.getlogp(vi))")
+println("Un-transformed flag: $(DynamicPPL.istrans(vi, vn_x))")
+```
+
+### Values and 'internal' values
+
+In DynamicPPL, there is a difference between the value of a random variable and its 'internal' value.
+This is most easily seen by first transforming, and then comparing the output of `getindex` and `getindex_internal`.
+The former extracts the regular value, whereas (as the name suggests) the latter gets the 'internal' value.
+
+```{julia}
+# Transform
+DynamicPPL.link!!(vi, model)
+
+println("Value: $(getindex(vi, vn_x))")  # same as `vi[vn_x]`
+println("Internal value: $(DynamicPPL.getindex_internal(vi, vn_x))")
+```
+
+We can see that there are _two_ differences between these outputs:
+
+1. _The internal value has been transformed using the bijector (in this case, the log function)._
+   This means that the `istrans()` flag which we used above doesn't tell us anything about whether the 'external' value has been transformed: it only tells us about the internal value.
+
+2. _The internal value is a vector, whereas the value is a scalar._
+   This is because _all_ internal values are vectorised (i.e. converted into some vector), regardless of distribution.
+
+   | Distribution                     | Value  | Internal value                          |
+   | ---                              | ---    | ---                                     |
+   | Univariate (e.g. `Normal()`)     | Scalar | Length-1 vector, possibly transformed   |
+   | Multivariate (e.g. `MvNormal()`) | Vector | Vector, possibly transformed            |
+   | Matrixvariate (e.g. `Wishart()`) | Matrix | Vectorised matrix, possibly transformed |
+
+Essentially, the value is the one which the user 'expects' to see based on the model definition.
+The 'internal' value is one that is the most convenient representation to work with inside DynamicPPL.
+
+It also means that internally, the transformation in `link!!` is carried out in three steps:
+
+1. Un-vectorise the internal value.
+2. Apply the transformation.
+3. Vectorise the transformed value.
+
+The actual implementation is slightly harder to parse as it has to work for different flavours of `VarInfo`, but it eventually boils down to the following:
+
+```{julia}
+invlink!!(vi, model)  # Reset to un-transformed state
+dist = DynamicPPL.getdist(vi, vn_x)
+x_val = DynamicPPL.getindex_internal(vi, vn_x)
+```
+
+```{julia}
+# Step 1: un-vectorise
+fn1 = DynamicPPL.from_vec_transform(dist)
+fn1(x_val)
+```
+
+```{julia}
+# Step 2: transform
+# DynamicPPL.link_transform(dist) is really Bijectors.bijector(dist)
+fn2 = DynamicPPL.link_transform(dist)
+fn2(fn1(x_val))
+```
+
+```{julia}
+# Step 3.: re-vectorise
+fn3 = DynamicPPL.to_vec_transform(dist)
+fn3(fn2(fn1(x_val)))
+```
+
+### So when does the transformation actually happen?
+
+TODO
+
+... see HMC implementation in Turing
+
+... logdensity evaluation on a LogDensityFunction -> `evaluate!!`
+
+... tilde pipeline
+
+e.g. `assume` for HMC is here https://github.com/TuringLang/Turing.jl/blob/5b24cebe773922e0f3d5c4cb7f53162eb758b04d/src/mcmc/hmc.jl#L493C1-L498C4
+
+which goes to the default `assume` implementation https://github.com/TuringLang/DynamicPPL.jl/blob/ba490bf362653e1aaefe298364fe3379b60660d3/src/context_implementations.jl#L225-L229
+
+which leads to `invlink_with_logpdf` https://github.com/TuringLang/DynamicPPL.jl/blob/ba490bf362653e1aaefe298364fe3379b60660d3/src/abstract_varinfo.jl#L773-L792
+
+which returns the UNTRANSFORMED value (important to explain why here – it's because the return value is assigned to the variable in the model, which the user can see) and the appropriately calculated logpdf, depending on whether `istrans(vi, vn)` returns true
+
+TODO: Understand `maybe_invlink_before_eval`.
