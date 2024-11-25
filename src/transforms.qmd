@@ -624,9 +624,6 @@ E(z) = -logq(z)
 dEdz(z) = ForwardDiff.derivative(E, z)
 ```
 
-The `exp`/`log` wrapping is a bit awkward.
-In practice we would only ever work on the log scale, but
-
 Now, because our transformed distribution is unconstrained, we can evaluate `E` and `dEdz` at any point, and sample with more confidence:
 
 ```{julia}
@@ -730,28 +727,28 @@ with a manual calculation:
 logpdf(LogNormal(), DynamicPPL.getindex_internal(vi, vn_x))
 ```
 
-In DynamicPPL, the `link!!` function can be used to transform the variables.
-These functions do three things: firstly, they transform the variables; secondly, they update the value of logp (by adding the Jacobian term); and thirdly, they set a flag on the variables to indicate that it has been transformed.
-Note that these functions act on _all_ variables in the model, including unconstrained ones.
+In DynamicPPL, the `link` function can be used to transform the variables.
+This function does three things: firstly, it transforms the variables; secondly, it updates the value of logp (by adding the Jacobian term); and thirdly, it sets a flag on the variables to indicate that it has been transformed.
+Note that this acts on _all_ variables in the model, including unconstrained ones.
 (Unconstrained variables just have an identity transformation.)
 
 ```{julia}
-DynamicPPL.link!!(vi, model)
-println("Transformed value: $(DynamicPPL.getindex_internal(vi, vn_x))")
-println("Transformed logp: $(DynamicPPL.getlogp(vi))")
-println("Transformed flag: $(DynamicPPL.istrans(vi, vn_x))")
+vi_linked = DynamicPPL.link(vi, model)
+println("Transformed value: $(DynamicPPL.getindex_internal(vi_linked, vn_x))")
+println("Transformed logp: $(DynamicPPL.getlogp(vi_linked))")
+println("Transformed flag: $(DynamicPPL.istrans(vi_linked, vn_x))")
 ```
 
 Indeed, we can see that the new logp value matches with
 
 ```{julia}
-logpdf(Normal(), DynamicPPL.getindex_internal(vi, vn_x))
+logpdf(Normal(), DynamicPPL.getindex_internal(vi_linked, vn_x))
 ```
 
-The reverse transformation, `invlink!!`, reverts all of the above steps:
+The reverse transformation, `invlink`, reverts all of the above steps:
 
 ```{julia}
-DynamicPPL.invlink!!(vi, model)
+vi = DynamicPPL.invlink(vi_linked, model)  # Same as the previous vi
 println("Un-transformed value: $(DynamicPPL.getindex_internal(vi, vn_x))")
 println("Un-transformed logp: $(DynamicPPL.getlogp(vi))")
 println("Un-transformed flag: $(DynamicPPL.istrans(vi, vn_x))")
@@ -764,14 +761,11 @@ This is most easily seen by first transforming, and then comparing the output of
 The former extracts the regular value, whereas (as the name suggests) the latter gets the 'internal' value.
 
 ```{julia}
-# Transform
-DynamicPPL.link!!(vi, model)
-
-println("Value: $(getindex(vi, vn_x))")  # same as `vi[vn_x]`
-println("Internal value: $(DynamicPPL.getindex_internal(vi, vn_x))")
+println("Value: $(getindex(vi_linked, vn_x))")  # same as `vi_linked[vn_x]`
+println("Internal value: $(DynamicPPL.getindex_internal(vi_linked, vn_x))")
 ```
 
-We can see that there are _two_ differences between these outputs:
+We can see (for the linked varinfo) that there are _two_ differences between these outputs:
 
 1. _The internal value has been transformed using the bijector (in this case, the log function)._
    This means that the `istrans()` flag which we used above doesn't tell us anything about whether the 'external' value has been transformed: it only tells us about the internal value.
@@ -788,16 +782,16 @@ We can see that there are _two_ differences between these outputs:
 Essentially, the value is the one which the user 'expects' to see based on the model definition.
 The 'internal' value is one that is the most convenient representation to work with inside DynamicPPL.
 
-It also means that internally, the transformation in `link!!` is carried out in three steps:
+It also means that internally, the transformation in `link` is carried out in three steps:
 
 1. Un-vectorise the internal value.
 2. Apply the transformation.
 3. Vectorise the transformed value.
 
-The actual implementation is slightly harder to parse as it has to work for different flavours of `VarInfo`, but it eventually boils down to the following:
+The actual implementation is slightly harder to parse as it has to work for different flavours of `VarInfo`, but it eventually boils down to the following (see the implementation [here](https://github.com/TuringLang/DynamicPPL.jl/blob/ba490bf362653e1aaefe298364fe3379b60660d3/src/varinfo.jl#L1390-L1414)):
 
 ```{julia}
-invlink!!(vi, model)  # Reset to un-transformed state
+# Use the un-linked varinfo
 dist = DynamicPPL.getdist(vi, vn_x)
 x_val = DynamicPPL.getindex_internal(vi, vn_x)
 ```
@@ -821,22 +815,62 @@ fn3 = DynamicPPL.to_vec_transform(dist)
 fn3(fn2(fn1(x_val)))
 ```
 
-### So when does the transformation actually happen?
+## Sampling in Turing.jl
 
-TODO
+DynamicPPL provides the _functionality_ for transforming variables, but the transformation itself happens at an even higher level, i.e. in the sampler itself.
+For example, consider the HMC sampler in Turing.jl, which is in [this file](https://github.com/TuringLang/Turing.jl/blob/5b24cebe773922e0f3d5c4cb7f53162eb758b04d/src/mcmc/hmc.jl).
+In the first step of sampling, it calls `link` on the sampler.
+This transformation is preserved throughout the sampling process, meaning that `istrans()` always returns true.
 
-... see HMC implementation in Turing
+We can observe this by inserting print statements into the model.
+Here, `__varinfo__` is the internal symbol for the `VarInfo` object used in model evaluation:
 
-... logdensity evaluation on a LogDensityFunction -> `evaluate!!`
+```{julia}
+@model function demo2()
+    x ~ LogNormal()
+    if x isa Float64
+        println("-----------")
+        println("value: $x")
+        println("internal value: $(DynamicPPL.getindex_internal(__varinfo__, @varname(x)))")
+        println("istrans: $(istrans(__varinfo__, @varname(x)))")
+    end
+end
 
-... tilde pipeline
+sample(demo2(), HMC(0.1, 3), 3);
+```
 
-e.g. `assume` for HMC is here https://github.com/TuringLang/Turing.jl/blob/5b24cebe773922e0f3d5c4cb7f53162eb758b04d/src/mcmc/hmc.jl#L493C1-L498C4
+(Here, the check on `if x isa Float64` prevents the printing from occurring during computation of the derivative.)
+You can see that during the actual sampling, `istrans` is always kept as `true`.
 
-which goes to the default `assume` implementation https://github.com/TuringLang/DynamicPPL.jl/blob/ba490bf362653e1aaefe298364fe3379b60660d3/src/context_implementations.jl#L225-L229
+::: {.callout-note}
+The first two model evaluations where `istrans` is `false` occur prior to the actual sampling.
+One occurs when the model is checked for correctness (using [`DynamicPPL.check_model_and_trace`](https://github.com/TuringLang/DynamicPPL.jl/blob/ba490bf362653e1aaefe298364fe3379b60660d3/src/debug_utils.jl#L582-L612)).
+The second occurs because the model is evaluated once to generate a set of initial parameters inside [DynamicPPL's implementation of `AbstractMCMC.step`](https://github.com/TuringLang/DynamicPPL.jl/blob/ba490bf362653e1aaefe298364fe3379b60660d3/src/sampler.jl#L98-L117).
+Both of these steps occur with all samplers in Turing.jl.
+:::
 
-which leads to `invlink_with_logpdf` https://github.com/TuringLang/DynamicPPL.jl/blob/ba490bf362653e1aaefe298364fe3379b60660d3/src/abstract_varinfo.jl#L773-L792
+What this means is that from the perspective of the HMC sampler, it _never_ sees the constrained variable: it always thinks that it is sampling from an unconstrained distribution.
 
-which returns the UNTRANSFORMED value (important to explain why here – it's because the return value is assigned to the variable in the model, which the user can see) and the appropriately calculated logpdf, depending on whether `istrans(vi, vn)` returns true
+The biggest prerequisite for this to work correctly is that the potential energy term in the Hamiltonian—or in other words, the model log density—must be programmed correctly to include the Jacobian term.
+This is exactly the same as how we had to make sure to define `logq(y)` correctly in the toy HMC example above.
 
-TODO: Understand `maybe_invlink_before_eval`.
+This occurs correctly because a statement like `x ~ LogNormal()` in the model definition above is translated into `assume(LogNormal(), @varname(x), __varinfo__)`, defined [here](https://github.com/TuringLang/DynamicPPL.jl/blob/ba490bf362653e1aaefe298364fe3379b60660d3/src/context_implementations.jl#L225-L229).
+As can be seen by following through on the definition of `invlink_with_logpdf`, this does indeed checks for the presence of the `istrans` flag and adds the Jacobian accordingly.
+
+::: {.callout-note}
+The discussion above skips over several steps in the Turing.jl codebase, which can be difficult to follow.
+Specifically:
+
+1. Samplers such as HMC [wrap Turing models in a `DynamicPPL.LogDensityFunction`](https://github.com/TuringLang/Turing.jl/blob/5b24cebe773922e0f3d5c4cb7f53162eb758b04d/src/mcmc/hmc.jl#L159-L168).
+2. The log density at a given set of parameter values can then be [calculated using `logdensity`](https://github.com/TuringLang/DynamicPPL.jl/blob/ba490bf362653e1aaefe298364fe3379b60660d3/src/logdensityfunction.jl#L136-L141)
+3. This in turn calls `evaluate!!`, which runs the _model evaluator function_. This evaluator function is not visible in the DynamicPPL codebase because it is generated by the expansion of the `@model` macro. You can see it, though, by running:
+   ```julia
+   @macroexpand @model demo3() = x ~ LogNormal()
+   ```
+   Note that these evaluations do not trigger the print statements in the model because it is run using automatic differentiation (in this case, `x` is a `ForwardDiff.Dual`).
+4. This generates a line which looks like 
+   ```julia
+   (var"##value#441", __varinfo__) = (DynamicPPL.tilde_assume!!)(__context__, (DynamicPPL.unwrap_right_vn)((DynamicPPL.check_tilde_rhs)(var"##dist#440"), var"##vn#437")..., __varinfo__)
+   ```
+   `tilde_assume!!` in turn calls `tilde_assume`, which ultimately delegates to `assume`.
+:::
