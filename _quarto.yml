@@ -8,6 +8,7 @@ book:
   chapters:
     - index.qmd
     - src/transforms.qmd
+    - src/chain.qmd
 
 format:
   html:

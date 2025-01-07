@@ -6,6 +6,10 @@ engine: julia
 ```{julia}
 import Random
 Random.seed!(468);
+
+using Distributions: Normal, LogNormal, pdf, logpdf, Distributions
+using Statistics: mean, var
+using Plots: histogram
 ```
 
 This article seeks to motivate Bijectors.jl and how distributions are transformed in the Turing.jl probabilistic programming language.
@@ -17,22 +21,20 @@ It assumes:
 
 ## Sampling from a distribution
 
-To sample from a distribution (as defined in Distributions.jl), we can use the `rand` function.
+To sample from a distribution (as defined in [Distributions.jl](https://juliastats.org/Distributions.jl/)), we can use the `rand` function.
 Let's sample from a normal distribution and then plot a histogram of the samples.
-Calling `Normal()` with no arguments gives a standard normal distribution with mean 0 and standard deviation 1.
 
 ```{julia}
-using Distributions
-using Plots
-
 samples = rand(Normal(), 5000)
 histogram(samples, bins=50)
 ```
 
-That's all great, and furthermore if you want to know the probability of observing any of the samples, you can use `logpdf`:
+(Calling `Normal()` without any arguments, as we do here, gives us a normal distribution with mean 0 and standard deviation 1.)
+If you want to know the probability of observing any of the samples, you can use `logpdf`:
 
 ```{julia}
-(samples[1], logpdf(Normal(), samples[1]))
+println("sample: $(samples[1])")
+println("logpdf: $(logpdf(Normal(), samples[1]))")
 ```
 
 The probability density function for the normal distribution with mean 0 and standard deviation 1 is
@@ -51,17 +53,20 @@ Say that $x$ is distributed according to `Normal()`, and we want to draw samples
 Now, $y$ is itself a random variable, and like any other random variable, will have a probability distribution, which we'll call $q(y)$.
 
 In this specific case, the distribution of $y$ is known as a [log-normal distribution](https://en.wikipedia.org/wiki/Log-normal_distribution).
-For illustration purposes, let's try to implement our own `MyLogNormal` distribution that we can sample from.
+For the purposes of this tutorial, let's implement our own `MyLogNormal` distribution that we can sample from.
 (Distributions.jl already defines its own `LogNormal`, so we have to use a different name.)
+To do this, we need to overload `Base.rand` for our new distribution.
 
 ```{julia}
-struct MyLogNormal <: ContinuousUnivariateDistribution
+struct MyLogNormal <: Distributions.ContinuousUnivariateDistribution
     μ::Float64
     σ::Float64
 end
 MyLogNormal() = MyLogNormal(0.0, 1.0)
 
-Base.rand(rng::Random.AbstractRNG, d::MyLogNormal) = exp(rand(rng, Normal(d.μ, d.σ)))
+function Base.rand(rng::Random.AbstractRNG, d::MyLogNormal)
+  exp(rand(rng, Normal(d.μ, d.σ)))
+end
 ```
 
 Now we can do the same as above:
@@ -75,7 +80,7 @@ histogram(samples_lognormal, bins=0:0.1:5; xlims=(0, 5))
 How do we implement `logpdf` for our new distribution, though?
 Or in other words, if we observe a sample $y$, how do we know what the probability of drawing that sample was?
 
-Naively, we might think to just un-transform the variable `y` by reversing the exponential, i.e. taking the logarithm
+Naively, we might think to just un-transform the variable `y` by reversing the exponential, i.e. taking the logarithm.
 We could then use the `logpdf` of the original distribution of `x`.
 
 ```{julia}
@@ -94,13 +99,12 @@ Clearly this approach is not quite correct!
 
 ## The derivative
 
-Fundamentally, the reason why this doesn't work is because transforming a (continuous) distribution causes probability density to be stretched and otherwise moved around.
+The reason why this doesn't work is because transforming a (continuous) distribution causes probability density to be stretched and otherwise moved around.
+For example, in the normal distribution, half of the probability density is between $-\infty$ and $0$, and half is between $0$ and $\infty$.
+When exponentiated (i.e. in the log-normal distribution), the first half of the density is mapped to the interval $(0, 1)$, and the second half to $(1, \infty)$.
 
-::: {.callout-note}
-There are various posts on the Internet that explain this visually.
-:::
-
-A perhaps useful approach is to not talk about _probability densities_, but instead to make it more concrete by talking about actual _probabilities_.
+This 'explanation' on its own does not really mean much, though.
+A perhaps more useful approach is to not talk about _probability densities_, but instead to make it more concrete by relating them to actual _probabilities_.
 If we think about the normal distribution as a continuous curve, what the probability density function $p(x)$ really tells us is that: for any two points $a$ and $b$ (where $a \leq b$), the probability of drawing a sample between $a$ and $b$ is the corresponding area under the curve, i.e.
 
 $$\int_a^b p(x) \, \mathrm{d}x.$$
@@ -115,7 +119,7 @@ $$\int_{\exp(a)}^{\exp(b)} q(y) \, \mathrm{d}y.$$
 This integral should be equal to the one above, because the probability of drawing from $[a, b]$ in the original distribution should be the same as the probability of drawing from $[\exp(a), \exp(b)]$ in the transformed distribution.
 The question we have to solve here is: how do we find a function $q(y)$ such that this equality holds?
 
-We can approach this by substituting $y = \exp(x)$ into the first integral (see [Wikipedia](https://en.wikipedia.org/wiki/Integration_by_substitution) for a refresher if needed).
+We can approach this by making the substitution $y = \exp(x)$ in the first integral (see [Wikipedia](https://en.wikipedia.org/wiki/Integration_by_substitution) for a refresher on substitutions in integrals, if needed).
 We have that:
 
 $$\frac{\mathrm{d}y}{\mathrm{d}x} = \exp(x) = y \implies \mathrm{d}x = \frac{1}{y}\,\mathrm{d}y$$
@@ -123,7 +127,9 @@ $$\frac{\mathrm{d}y}{\mathrm{d}x} = \exp(x) = y \implies \mathrm{d}x = \frac{1}{
 and so
 
 $$\int_{x=a}^{x=b} p(x) \, \mathrm{d}x
-  \longrightarrow \int_{y=\exp(a)}^{y=\exp(b)} \underbrace{p(\log(y)) \frac{1}{y}}_{q(y)} \,\mathrm{d}y,$$
+  = \int_{y=\exp(a)}^{y=\exp(b)} p(\log(y)) \frac{1}{y} \,\mathrm{d}y
+  = \int_{\exp(a)}^{\exp(b)} q(y) \, \mathrm{d}y,
+$$
 
 from which we can read off $q(y) = p(\log(y)) / y$.
 
@@ -151,49 +157,56 @@ println("Expected : $(logpdf(LogNormal(), samples_lognormal[1]))")
 println("Actual   : $(logpdf(MyLogNormal(), samples_lognormal[1]))")
 ```
 
-The same logic can be applied to _any_ kind of transformation.
-If we have some transformation from $x$ to $y$, and the probability density functions of $x$ and $y$ are $p(x)$ and $q(y)$ respectively, then
+The same process can be applied to _any_ kind of transformation.
+If we have some transformation from $x$ to $y$, and the probability density functions of $x$ and $y$ are $p(x)$ and $q(y)$ respectively, then we have a general formula that:
 
 $$q(y) = p(x) \left| \frac{\mathrm{d}x}{\mathrm{d}y} \right|.$$
 
 In this case, we had $y = \exp(x)$, so $\mathrm{d}x/\mathrm{d}y = 1/y$.
-This equation is (11.5) in Bishop's textbook.
+(This equation is (11.5) in Bishop's textbook.)
 
 ::: {.callout-note}
-The absolute value here takes care of the case where $f$ is decreasing, i.e., the distribution is flipped.
+The absolute value here takes care of the case where $f$ is a decreasing function, i.e., $f(x) > f(y)$ when $x < y$.
 You can try this out with the transformation $y = -\exp(x)$.
-If $a < b$, then $-exp(a) > -exp(b)$, and so you will have to swap the integration limits to ensure that the integral comes out positive.
+If $a < b$, then $-\exp(a) > -\exp(b)$, and so you will have to swap the integration limits to ensure that the integral comes out positive.
 :::
+
+Note that $\mathrm{d}y/\mathrm{d}x$ is equal to $(\mathrm{d}x/\mathrm{d}y)^{-1}$, so the formula above can also be written as:
+
+$$q(y) \left| \frac{\mathrm{d}y}{\mathrm{d}x} \right| = p(x).$$
 
 ## The Jacobian
 
-In general, we may have transforms that act on multivariate distributions, for example something mapping $p(x_1, x_2)$ to $q(y_1, y_2)$.
-In this case, the rule above has to be extended by replacing the derivative $\mathrm{d}x/\mathrm{d}y$ with the determinant of the Jacobian matrix:
+In general, we may have transforms that act on multivariate distributions: for example, something mapping $p(x_1, x_2)$ to $q(y_1, y_2)$.
+In this case, we need to extend the rule above by introducing what is known as the Jacobian matrix:
 
-$$\mathcal{J} = \begin{pmatrix}
-\partial x_1/\partial y_1 & \partial x_1/\partial y_2 \\
-\partial x_2/\partial y_1 & \partial x_2/\partial y_2
-\end{pmatrix}.$$
-
-and specifically,
-
-$$q(y_1, y_2) = p(x_1, x_2) \left| \det(\mathcal{J}) \right|.$$
-
-This is the same as equation (11.9) in Bishop, except that he denotes the absolute value of the determinant with just $|\mathcal{J}|$.
-
-::: {.callout-important}
-Note that, if we have a function $f$ mapping $\mathbf{x}$ to $\mathbf{y}$, then the Jacobian matrix $\mathbf{J}$ (sometimes denoted $\mathbf{J}_f$) is usually defined _the other way round_:
+In this case, the rule above has to be extended by replacing the derivative $\mathrm{d}x/\mathrm{d}y$ with the determinant of the inverse Jacobian matrix:
 
 $$\mathbf{J} = \begin{pmatrix}
 \partial y_1/\partial x_1 & \partial y_1/\partial x_2 \\
 \partial y_2/\partial x_1 & \partial y_2/\partial x_2
 \end{pmatrix}.$$
 
-Indeed, later in this article we will see that Bijectors.jl uses this convention.
-This is why we have denoted this 'inverse' Jacobian as $\mathcal{J}$, rather than $\mathbf{J}$.
+This allows us to write the direct generalisation as:
 
-$\mathcal{J}$ is really the Jacobian of the inverse function $f^{-1}$.
-As it turns out, the matrix $\mathcal{J}$ is also the inverse of $\mathbf{J}$.
+$$q(y_1, y_2) \left| \det(\mathbf{J}) \right| = p(x_1, x_2),$$
+
+or equivalently,
+
+$$q(y_1, y_2) = p(x_1, x_2) \left| \det(\mathbf{J}^{-1}) \right|.$$
+
+where $\mathbf{J}^{-1}$ is the inverse of the Jacobian matrix.
+This is the same as equation (11.9) in Bishop.
+
+::: {.callout-note}
+Instead of inverting the original Jacobian matrix to get $\mathbf{J}^{-1}$, we could also use the Jacobian of the inverse function:
+
+$$\mathbf{J}_\text{inv} = \begin{pmatrix}
+\partial x_1/\partial y_1 & \partial x_1/\partial y_2 \\
+\partial x_2/\partial y_1 & \partial x_2/\partial y_2
+\end{pmatrix}.$$
+
+As it turns out, these are entirely equivalent: the Jacobian of the inverse function is the inverse of the original Jacobian matrix.
 :::
 
 The rest of this section will be devoted to an example to show that this works, and contains some slightly less pretty mathematics.
@@ -323,7 +336,14 @@ Specifically, one of the primary purposes of Bijectors.jl is used to construct _
 For example, the log-normal distribution which we saw above is constrained: its _support_, i.e. the range over which $p(x) \geq 0$, is $(0, \infty)$.
 However, we can transform that to an unconstrained distribution (the normal distribution) using the transformation $y = \log(x)$.
 
+::: {.callout-note}
+Bijectors.jl, as well as DynamicPPL (which we'll come to later), can work with a much broader class of bijective transformations of variables, not just ones that go to the entire real line.
+But for the purposes of MCMC, unconstraining is the most common transformation, so we'll stick with that terminology.
+:::
+
+
 The `bijector` function, when applied to a distribution, returns a bijection $f$ that can be used to map the constrained distribution to an unconstrained one.
+Unsurprisingly, for the log-normal distribution, the bijection is (a broadcasted version of) the $\log$ function.
 
 ```{julia}
 import Bijectors as B
@@ -370,32 +390,8 @@ println("Expected: $(logpdf(Normal(), samples_plot[1]))")
 println("Actual:   $(logpdf(transformed_dist, samples_plot[1]))")
 ```
 
-Given the discussion in the previous sections, you might not be surprised to find that the transformed distribution is implemented using the Jacobian of the transformation.
-Recall that
-
-$$q(\mathbf{y}) = p(\mathbf{x}) \left| \det(\mathcal{J}) \right|,$$
-
-where (if we assume that both $\mathbf{x}$ and $\mathbf{y}$ have length 2)
-
-$$\mathcal{J} = \begin{pmatrix}
-\partial x_1/\partial y_1 & \partial x_1/\partial y_2 \\
-\partial x_2/\partial y_1 & \partial x_2/\partial y_2
-\end{pmatrix}.$$
-
-Slightly annoyingly, the convention in Bijectors.jl is the opposite way round compared to that in Bishop's book.
-(Or perhaps it's annoying that Bishop's book uses the opposite convention!)
-In Bijectors.jl, the Jacobian is defined as
-
-$$\mathbf{J} = \begin{pmatrix}
-\partial y_1/\partial x_1 & \partial y_1/\partial x_2 \\
-\partial y_2/\partial x_1 & \partial y_2/\partial x_2
-\end{pmatrix},$$
-
-(note the partial derivatives have been flipped upside-down) and we have that
-
-$$q(\mathbf{y})\left| \det(\mathbf{J}) \right| = p(\mathbf{x}),$$
-
-or equivalently
+Given the discussion in the previous sections, you might not be surprised to find that the logpdf of the transformed distribution is implemented using the Jacobian of the transformation.
+In particular, it [directly uses](https://github.com/TuringLang/Bijectors.jl/blob/f52a9c52ede1f43155239447601387eb1dafe394/src/Bijectors.jl#L242-L255) the formula
 
 $$\log(q(\mathbf{y})) = \log(p(\mathbf{x})) - \log(|\det(\mathbf{J})|).$$
 
@@ -452,7 +448,7 @@ end
 
 # Run a random walk Metropolis sampler.
 # `p`  : a function that takes `x` and returns the pdf of the distribution
-#        we're trying to sample from
+#        we're trying to sample from (up to a constant multiplicative factor)
 # `x0` : the initial state
 function mh(p, x0, n_samples)
     samples = []
@@ -476,7 +472,7 @@ histogram(samples_with_mh, bins=0:0.1:5; xlims=(0, 5))
 In this MH implementation, the only place where $p(x)$ comes into play is in the acceptance probability.
 
 As long as we make sure to start the sampling at a point within the support of the distribution, `p(x)` will be nonzero.
-If the proposal step generates an `x_proposal` that is outside the support, `p(x_proposal)` will be zero, and the acceptance probability (`p(x_proposal)/p(x)`) will be zero.
+If the proposal step generates an `x_proposal` that is outside the support, `p(x_proposal)` will be zero, and the acceptance probability `p(x_proposal)/p(x)` will be zero.
 So such a step will never be accepted, and the sampler will continue to stay within the support of the distribution.
 
 Although this does mean that we may find ourselves having a higher reject rate than usual, and thus less efficient sampling, it at least does not cause the algorithm to become unstable or crash.
@@ -600,13 +596,13 @@ Perhaps unsurprisingly, the answer to this is to transform the underlying distri
 However, we have to make sure that we include the pesky Jacobian term when sampling from the transformed distribution.
 That's where Bijectors.jl can come in.
 
-The main change we need to make is to pass a modified version of the function `p` to our HMC sampler.
-Recall back at the very start, we transformed $p(x)$ into $q(y)$, and said that
+The main change we need to make is to pass a modified probability density to our HMC sampler.
+Recall that
 
-$$q(y) = p(x) \left| \frac{\mathrm{d}x}{\mathrm{d}y} \right|.$$
+$$\log(q(\mathbf{y})) = \log(p(\mathbf{x})) - \log(|\det(\mathbf{J})|).$$
 
-What we want the HMC sampler to see is the transformed distribution $q(y)$, not the original distribution $p(x)$.
-And Bijectors.jl lets us calculate $\log(q(y))$ using `logpdf_with_trans(p, x, true)`:
+Instead of passing $E = -\log(p(\mathbf{x})$, we will instead pass $E = -\log(q(\mathbf{y}))$, meaning that the HMC sampler sees the transformed distribution $q(y)$ rather than the original distribution $p(x)$.
+Conveniently, Bijectors.jl lets us calculate $\log(q(y))$ using `logpdf_with_trans(p, x, true)`:
 
 ```{julia}
 d = LogNormal()
@@ -617,9 +613,6 @@ function logq(y)
     x = f_inv(y)
     return B.logpdf_with_trans(d, x, true)
 end
-# These definitions are the same as before, except that
-# the call to `log` has been moved up into logq rather
-# than in E.
 E(z) = -logq(z)
 dEdz(z) = ForwardDiff.derivative(E, z)
 ```
@@ -631,7 +624,7 @@ samples_with_hmc = hmc(1.0, E, dEdz, 5000)
 samples_with_hmc[1:5]
 ```
 
-No sampling errors this time... yay!
+There aren't any sampling errors this time, thankfully!
 We have to remember that when we run HMC on this, it will give us back samples of `y`, not `x`.
 So we can untransform them:
 
@@ -640,34 +633,21 @@ samples_with_hmc_untransformed = f_inv(samples_with_hmc)
 histogram(samples_with_hmc_untransformed, bins=0:0.1:5; xlims=(0, 5))
 ```
 
-We can also check that the mean and variance of the samples are what we expect them to be.
-From [Wikipedia](https://en.wikipedia.org/wiki/Log-normal_distribution), the mean and variance of a log-normal distribution are respectively $\exp(\mu + \sigma^2/2)$ and $[\exp(\sigma^2) - 1]\exp(2\mu + \sigma^2)$.
-For our log-normal distribution, we set $\mu = 0$ and $\sigma = 1$, so the mean and variance should be $1.6487$ and $4.6707$ respectively.
+How do we know that this has sampled correctly?
+For one, we can check that the mean of the samples are what we expect them to be.
+From [Wikipedia](https://en.wikipedia.org/wiki/Log-normal_distribution), the mean of a log-normal distribution is given by $\exp[\mu + (\sigma^2/2)]$.
+For our log-normal distribution, we set $\mu = 0$ and $\sigma = 1$, so:
 
 ```{julia}
-println("    mean : $(mean(samples_with_hmc_untransformed))")
-println("variance : $(var(samples_with_hmc_untransformed))")
+println("expected mean: $(exp(0 + (1^2/2)))")
+println("  actual mean: $(mean(samples_with_hmc_untransformed))")
 ```
-
-::: {.callout-note}
-You might notice that the variance is a little bit off.
-The truth is that it's actually quite tricky to get an accurate variance when sampling from a log-normal distribution.
-You can see this even with Turing.jl itself:
-
-```{julia}
-using Turing
-setprogress!(false)
-@model ln() = x ~ LogNormal()
-chain = sample(ln(), HMC(0.2, 3), 5000)
-(mean(chain[:x]), var(chain[:x]))
-```
-:::
 
 The importance of the Jacobian term here isn't to enable sampling _per se_.
 Because the resulting distribution is unconstrained, we could have still sampled from it without using the Jacobian.
 However, adding the Jacobian is what ensures that when we un-transform the samples, we get the correct distribution.
 
-This is what happens if we don't include the Jacobian term.
+The next code block shows what happens if we don't include the Jacobian term.
 In this `logq_wrong`, we've un-transformed `y` to `x` and calculated the logpdf with respect to its original distribution.
 This is exactly the same mistake that we made at the start of this article with `naive_logpdf`.
 
@@ -681,13 +661,12 @@ dEdz(z) = ForwardDiff.derivative(E, z)
 samples_questionable = hmc(1.0, E, dEdz, 5000)
 samples_questionable_untransformed = f_inv(samples_questionable)
 
-println("    mean : $(mean(samples_questionable_untransformed))")
-println("variance : $(var(samples_questionable_untransformed))")
+println("mean: $(mean(samples_questionable_untransformed))")
 ```
 
-You can see that even though the sampling ran fine without errors, the summary statistics are completely wrong.
+You can see that even though the sampling ran fine without errors, the mean is completely wrong.
 
-## How does DynamicPPL use bijectors?
+## Linked and unlinked VarInfos in DynamicPPL
 
 In the final section of this article, we'll discuss the higher-level implications of constrained distributions in the Turing.jl framework.
 
@@ -709,7 +688,7 @@ end
 model = demo()
 vi = VarInfo(model)
 vn_x = @varname(x)
-# Retrieve the 'internal' value of x – we'll explain this later
+# Retrieve the 'internal' representation of x – we'll explain this later
 DynamicPPL.getindex_internal(vi, vn_x)
 ```
 
@@ -754,71 +733,51 @@ println("Un-transformed logp: $(DynamicPPL.getlogp(vi))")
 println("Un-transformed flag: $(DynamicPPL.istrans(vi, vn_x))")
 ```
 
-### Values and 'internal' values
+### Model and internal representations
 
 In DynamicPPL, there is a difference between the value of a random variable and its 'internal' value.
 This is most easily seen by first transforming, and then comparing the output of `getindex` and `getindex_internal`.
-The former extracts the regular value, whereas (as the name suggests) the latter gets the 'internal' value.
+The former extracts the regular value, which we call the **model representation** (because it is consistent with the distribution specified in the model).
+The latter, as the name suggests, gets the **internal representation** of the variable, which is how it is actually stored in the VarInfo object.
 
 ```{julia}
-println("Value: $(getindex(vi_linked, vn_x))")  # same as `vi_linked[vn_x]`
-println("Internal value: $(DynamicPPL.getindex_internal(vi_linked, vn_x))")
+println("   Model representation: $(getindex(vi_linked, vn_x))")
+println("Internal representation: $(DynamicPPL.getindex_internal(vi_linked, vn_x))")
 ```
 
-We can see (for the linked varinfo) that there are _two_ differences between these outputs:
+::: {.callout-note}
+Note that `vi_linked[vn_x]` can also be used as shorthand for `getindex(vi_linked, vn_x)`; this usage is common in the DynamicPPL/Turing codebase.
+:::
 
-1. _The internal value has been transformed using the bijector (in this case, the log function)._
-   This means that the `istrans()` flag which we used above doesn't tell us anything about whether the 'external' value has been transformed: it only tells us about the internal value.
+We can see (for this linked varinfo) that there are _two_ differences between these outputs:
 
-2. _The internal value is a vector, whereas the value is a scalar._
-   This is because _all_ internal values are vectorised (i.e. converted into some vector), regardless of distribution.
+1. _The internal representation has been transformed using the bijector (in this case, the log function)._
+   This means that the `istrans()` flag which we used above doesn't modify the model representation: it only tells us whether the internal representation has been transformed or not.
 
-   | Distribution                     | Value  | Internal value                          |
-   | ---                              | ---    | ---                                     |
-   | Univariate (e.g. `Normal()`)     | Scalar | Length-1 vector, possibly transformed   |
-   | Multivariate (e.g. `MvNormal()`) | Vector | Vector, possibly transformed            |
-   | Matrixvariate (e.g. `Wishart()`) | Matrix | Vectorised matrix, possibly transformed |
+2. _The internal representation is a vector, whereas the model representation is a scalar._
+   This is because in DynamicPPL, _all_ internal values are vectorised (i.e. converted into some vector), regardless of distribution. On the other hand, since the model specifies a univariate distribution, the model representation is a scalar.
 
-Essentially, the value is the one which the user 'expects' to see based on the model definition.
-The 'internal' value is one that is the most convenient representation to work with inside DynamicPPL.
-
-It also means that internally, the transformation in `link` is carried out in three steps:
-
-1. Un-vectorise the internal value.
-2. Apply the transformation.
-3. Vectorise the transformed value.
-
-The actual implementation is slightly harder to parse as it has to work for different flavours of `VarInfo`, but it eventually boils down to the following (see the implementation [here](https://github.com/TuringLang/DynamicPPL.jl/blob/ba490bf362653e1aaefe298364fe3379b60660d3/src/varinfo.jl#L1390-L1414)):
+One might also ask, what is the internal representation for an _unlinked_ varinfo?
 
 ```{julia}
-# Use the un-linked varinfo
-dist = DynamicPPL.getdist(vi, vn_x)
-x_val = DynamicPPL.getindex_internal(vi, vn_x)
+println("   Model representation: $(getindex(vi, vn_x))")
+println("Internal representation: $(DynamicPPL.getindex_internal(vi, vn_x))")
 ```
 
-```{julia}
-# Step 1: un-vectorise
-fn1 = DynamicPPL.from_vec_transform(dist)
-fn1(x_val)
-```
+For an unlinked VarInfo, the internal representation is vectorised, but not transformed.
+We call this an **unlinked internal representation**; conversely, when the VarInfo has been linked, each variable will have a corresponding **linked internal representation**.
 
-```{julia}
-# Step 2: transform
-# DynamicPPL.link_transform(dist) is really Bijectors.bijector(dist)
-fn2 = DynamicPPL.link_transform(dist)
-fn2(fn1(x_val))
-```
+This sequence of events is summed up in the following diagram, where `f(..., args)` indicates that the `...` is to be replaced with the object at the beginning of the arrow:
 
-```{julia}
-# Step 3.: re-vectorise
-fn3 = DynamicPPL.to_vec_transform(dist)
-fn3(fn2(fn1(x_val)))
-```
+![Functions related to variable transforms in DynamicPPL](./dynamicppl_link.png)
 
-## Sampling in Turing.jl
+In the final part of this article, we'll take a more in-depth look at the internal DynamicPPL machinery that allows us to convert between representations and obtain the correct probability densities.
+Before that, though, we'll take a quick high-level look at how the HMC sampler in Turing.jl uses the functions introduced so far.
 
-DynamicPPL provides the _functionality_ for transforming variables, but the transformation itself happens at an even higher level, i.e. in the sampler itself.
-For example, consider the HMC sampler in Turing.jl, which is in [this file](https://github.com/TuringLang/Turing.jl/blob/5b24cebe773922e0f3d5c4cb7f53162eb758b04d/src/mcmc/hmc.jl).
+## Case study: HMC in Turing.jl
+
+While DynamicPPL provides the _functionality_ for transforming variables, the transformation itself happens at an even higher level, i.e. in the sampler itself.
+The HMC sampler in Turing.jl is in [this file](https://github.com/TuringLang/Turing.jl/blob/5b24cebe773922e0f3d5c4cb7f53162eb758b04d/src/mcmc/hmc.jl).
 In the first step of sampling, it calls `link` on the sampler.
 This transformation is preserved throughout the sampling process, meaning that `istrans()` always returns true.
 
@@ -826,12 +785,15 @@ We can observe this by inserting print statements into the model.
 Here, `__varinfo__` is the internal symbol for the `VarInfo` object used in model evaluation:
 
 ```{julia}
+using Turing
+setprogress!(false)
+
 @model function demo2()
     x ~ LogNormal()
-    if x isa Float64
+    if x isa AbstractFloat
         println("-----------")
-        println("value: $x")
-        println("internal value: $(DynamicPPL.getindex_internal(__varinfo__, @varname(x)))")
+        println("model repn: $(DynamicPPL.getindex(__varinfo__, @varname(x)))")
+        println("internal repn: $(DynamicPPL.getindex_internal(__varinfo__, @varname(x)))")
         println("istrans: $(istrans(__varinfo__, @varname(x)))")
     end
 end
@@ -839,14 +801,14 @@ end
 sample(demo2(), HMC(0.1, 3), 3);
 ```
 
-(Here, the check on `if x isa Float64` prevents the printing from occurring during computation of the derivative.)
-You can see that during the actual sampling, `istrans` is always kept as `true`.
+(Here, the check on `if x isa AbstractFloat` prevents the printing from occurring during computation of the derivative.)
+You can see that during the three sampling steps, `istrans` is always kept as `true`.
 
 ::: {.callout-note}
 The first two model evaluations where `istrans` is `false` occur prior to the actual sampling.
 One occurs when the model is checked for correctness (using [`DynamicPPL.check_model_and_trace`](https://github.com/TuringLang/DynamicPPL.jl/blob/ba490bf362653e1aaefe298364fe3379b60660d3/src/debug_utils.jl#L582-L612)).
 The second occurs because the model is evaluated once to generate a set of initial parameters inside [DynamicPPL's implementation of `AbstractMCMC.step`](https://github.com/TuringLang/DynamicPPL.jl/blob/ba490bf362653e1aaefe298364fe3379b60660d3/src/sampler.jl#L98-L117).
-Both of these steps occur with all samplers in Turing.jl.
+Both of these steps occur with all samplers in Turing.jl, so are not specific to the HMC example shown here.
 :::
 
 What this means is that from the perspective of the HMC sampler, it _never_ sees the constrained variable: it always thinks that it is sampling from an unconstrained distribution.
@@ -854,23 +816,232 @@ What this means is that from the perspective of the HMC sampler, it _never_ sees
 The biggest prerequisite for this to work correctly is that the potential energy term in the Hamiltonian—or in other words, the model log density—must be programmed correctly to include the Jacobian term.
 This is exactly the same as how we had to make sure to define `logq(y)` correctly in the toy HMC example above.
 
-This occurs correctly because a statement like `x ~ LogNormal()` in the model definition above is translated into `assume(LogNormal(), @varname(x), __varinfo__)`, defined [here](https://github.com/TuringLang/DynamicPPL.jl/blob/ba490bf362653e1aaefe298364fe3379b60660d3/src/context_implementations.jl#L225-L229).
-As can be seen by following through on the definition of `invlink_with_logpdf`, this does indeed checks for the presence of the `istrans` flag and adds the Jacobian accordingly.
+Within Turing.jl, this is correctly handled because a statement like `x ~ LogNormal()` in the model definition above is translated into `assume(LogNormal(), @varname(x), __varinfo__)`, defined [here](https://github.com/TuringLang/DynamicPPL.jl/blob/ba490bf362653e1aaefe298364fe3379b60660d3/src/context_implementations.jl#L225-L229).
+If you follow the trail of function calls, you can verify that the `assume` function does indeed check for the presence of the `istrans` flag and adds the Jacobian term accordingly.
 
-::: {.callout-note}
-The discussion above skips over several steps in the Turing.jl codebase, which can be difficult to follow.
-Specifically:
+## A deeper dive into DynamicPPL's internal machinery
 
-1. Samplers such as HMC [wrap Turing models in a `DynamicPPL.LogDensityFunction`](https://github.com/TuringLang/Turing.jl/blob/5b24cebe773922e0f3d5c4cb7f53162eb758b04d/src/mcmc/hmc.jl#L159-L168).
-2. The log density at a given set of parameter values can then be [calculated using `logdensity`](https://github.com/TuringLang/DynamicPPL.jl/blob/ba490bf362653e1aaefe298364fe3379b60660d3/src/logdensityfunction.jl#L136-L141)
-3. This in turn calls `evaluate!!`, which runs the _model evaluator function_. This evaluator function is not visible in the DynamicPPL codebase because it is generated by the expansion of the `@model` macro. You can see it, though, by running:
-   ```julia
-   @macroexpand @model demo3() = x ~ LogNormal()
-   ```
-   Note that these evaluations do not trigger the print statements in the model because it is run using automatic differentiation (in this case, `x` is a `ForwardDiff.Dual`).
-4. This generates a line which looks like 
-   ```julia
-   (var"##value#441", __varinfo__) = (DynamicPPL.tilde_assume!!)(__context__, (DynamicPPL.unwrap_right_vn)((DynamicPPL.check_tilde_rhs)(var"##dist#440"), var"##vn#437")..., __varinfo__)
-   ```
-   `tilde_assume!!` in turn calls `tilde_assume`, which ultimately delegates to `assume`.
+As described above, DynamicPPL stores a (possibly linked) _internal representation_ which is accessible via `getindex_internal`, but can also provide users with the original, untransformed, _model representation_ via `getindex`.
+This abstraction allows the user to obtain samples from constrained distributions without having to perform the transformation themselves.
+
+![More functions related to variable transforms in DynamicPPL](./dynamicppl_link2.png)
+
+The conversion between these representations is done using several internal functions in DynamicPPL, as depicted in the above diagram.
+The following operations are labelled:
+
+1. This is linking, i.e. transforming a constrained variable to an unconstrained one.
+
+2. This is vectorisation: for example, converting a scalar value to a 1-element vector.
+
+3. This arrow brings us from the model representation to the linked internal representation.
+   This is the composition of (1) and (2): linking and then vectorising.
+
+4. This arrow brings us from the model representation to the unlinked internal representation.
+   This only requires a single step, vectorisation.
+
+Each of these steps can be accomplished using the following functions.
+
+|     | To get the function | To get the inverse function |
+| --- | ------------------- | --------------------------- |
+| (1) | `link_transform(dist)` | `invlink_transform(dist)` |
+| (2) | `to_vec_transform(dist)` | `from_vec_transform(dist)` |
+| (3) | `to_linked_internal_transform(vi, vn[, dist])` | `from_linked_internal_transform(vi, vn[, dist])` |
+| (4) | `to_internal_transform(vi, vn[, dist])` | `from_internal_transform(vi, vn[, dist])` |
+
+Note that these functions do not perform the actual transformation; rather, they return the transformation function itself.
+For example, let's take a look at the `VarInfo` from the previous section, which contains a single variable `x ~ LogNormal()`.
+
+```{julia}
+model_repn = vi[vn_x]
+```
+
+```{julia}
+# (1) Get the link function
+f_link = DynamicPPL.link_transform(LogNormal())
+# (2) Get the vectorise function
+f_vec = DynamicPPL.to_vec_transform(LogNormal())
+
+# Apply it to the model representation
+linked_internal_repn = f_vec(f_link(model_repn))
+```
+
+Equivalently, we could have done:
+
+```{julia}
+# (3) Get the linked internal transform function
+f_linked_internal = DynamicPPL.to_linked_internal_transform(vi, vn_x, LogNormal())
+
+# Apply it to the model representation
+linked_internal_repn = f_linked_internal(model_repn)
+```
+
+And let's confirm that this is the same as the linked internal representation, using the `VarInfo` that we linked earlier:
+
+```{julia}
+DynamicPPL.getindex_internal(vi_linked, vn_x)
+```
+
+The purpose of having all of these machinery is to allow other parts of DynamicPPL, such as the tilde pipeline, to handle transformed variables correctly.
+The following diagram shows how `assume` first checks whether the variable is transformed (using `istrans`), and then applies the appropriate transformation function.
+
+<!-- 'wrappingWidth' setting required because of https://github.com/mermaid-js/mermaid-cli/issues/112#issuecomment-2352670995 -->
+```{mermaid}
+%%{ init: { 'themeVariables': { 'lineColor': '#000000' } } }%%
+%%{ init: { 'flowchart': { 'curve': 'linear', 'wrappingWidth': -1 } } }%%
+graph TD
+    A["x ~ LogNormal()"]:::boxStyle
+    B["vn = <span style='color:#3B6EA8 !important;'>@varname</span>(x)<br>dist = LogNormal()<br>x, vi = ..."]:::boxStyle
+    C["assume(vn, dist, vi)"]:::boxStyle
+    D(["<span style='color:#3B6EA8 !important;'>if</span> istrans(vi, vn)"]):::boxStyle
+    E["f = from_internal_transform(vi, vn, dist)"]:::boxStyle
+    F["f = from_linked_internal_transform(vi, vn, dist)"]:::boxStyle
+    G["x, logjac = with_logabsdet_jacobian(f, getindex_internal(vi, vn, dist))"]:::boxStyle
+    H["<span style='color:#3B6EA8 !important;'>return</span> x, logpdf(dist, x) - logjac, vi"]:::boxStyle
+    
+    A -.->|<span style='color:#3B6EA8 ; background-color:#ffffff;'>@model</span>| B
+    B -.->|<span style='color:#000000 ; background-color:#ffffff;'>tilde-pipeline</span>| C
+    C --> D
+    D -->|<span style='color:#97365B ; background-color:#ffffff;'>false</span>| E
+    D -->|<span style='color:#97365B ; background-color:#ffffff;'>true</span>| F
+    E --> G
+    F --> G
+    G --> H
+
+    classDef boxStyle fill:#ffffff,stroke:#000000,font-family:Courier,color:#000000
+    linkStyle default stroke:#000000,stroke-width:1px,color:#000000
+```
+
+Here, `with_logabsdet_jacobian` is defined [in the ChangesOfVariables.jl package](https://juliamath.github.io/ChangesOfVariables.jl/stable/api/#ChangesOfVariables.with_logabsdet_jacobian), and returns both the effect of the transformation `f` as well as the log Jacobian term.
+
+Because we chose `f` appropriately, we find here that `x` is always the model representation; furthermore, if the variable was _not_ linked (i.e. `istrans` was false), the log Jacobian term will be zero.
+However, if it was linked, then the Jacobian term would be appropriately included, making sure that sampling proceeds correctly.
+
+## Why do we need to do this at runtime?
+
+Given that we know whether a `VarInfo` is linked or not, one might wonder why we need both `from_internal_transform` and `from_linked_internal_transform` at the point where the model is evaluated.
+Could we not, for example, store the required transformation inside the `VarInfo` when we link it, and simply reuse that each time?
+
+That is, why can't we just do
+
+```{mermaid}
+%%{ init: { 'flowchart': { 'curve': 'linear', 'wrappingWidth': -1 } } }%%
+%%{ init: { 'themeVariables': { 'lineColor': '#000000' } } }%%
+graph TD
+      A["assume(varinfo, <span style='color:#3B6EA8 !important;'>@varname</span>(x), Normal())"]:::boxStyle
+      B["f = from_internal_transform(varinfo, varname, dist)"]:::boxStyle
+      C["x, logjac = with_logabsdet_jacobian(f, getindex_internal(varinfo, varname))"]:::boxStyle
+      D["<span style='color:#3B6EA8 !important;'>return</span> x, logpdf(dist, x) - logjac, varinfo"]:::dashedBox
+      
+      A --> B
+      B --> C
+      C --> D
+
+    classDef dashedBox fill:#ffffff,stroke:#000000,stroke-dasharray: 5 5,font-family:Courier,color:#000000
+    classDef boxStyle fill:#ffffff,stroke:#000000,font-family:Courier,color:#000000
+
+    linkStyle default stroke:#000000,stroke-width:1px,color:#000000
+```
+
+where `from_internal_transform` here only looks up a stored transformation function?
+
+Unfortunately, this is not possible in general, because the transformation function might not be a constant between different model evaluations.
+Consider, for example, the following model:
+
+```{julia}
+@model function demo_dynamic_constraint()
+    m ~ Normal()
+    x ~ truncated(Normal(); lower=m)
+    return (m=m, x=x)
+end
+```
+
+Here, `m` is distributed according to a plain `Normal()`, whereas the variable `x` is constrained to be in the domain `(m, Inf)`.
+Because of this, we expect that any time we sample from the model, we should have that `m < x` (in terms of their model representations):
+
+```{julia}
+model = demo_dynamic_constraint()
+vi = VarInfo(model)
+vn_m, vn_x = @varname(m), @varname(x)
+
+vi[vn_m], vi[vn_x]
+```
+
+(Note that `vi[vn]` is a shorthand for `getindex(vi, vn)`, so this retrieves the model representations of `m` and `x`.)
+So far, so good.
+Let's now link this `VarInfo` so that we end up working in an 'unconstrained' space, where both `m` and `x` can take on any values in `(-Inf, Inf)`.
+First, we should check that the model representations are unchanged when linking:
+
+```{julia}
+vi_linked = link(vi, model)
+vi_linked[vn_m], vi_linked[vn_x]
+```
+
+But if we change the value of `m`, to, say, a bit larger than `x`:
+
+```{julia}
+# Update the model representation for `m` in `vi_linked`.
+vi_linked[vn_m] = vi_linked[vn_x] + 1
+vi_linked[vn_m], vi_linked[vn_x]
+```
+
+::: {.callout-warning}
+This is just for demonstration purposes!
+You shouldn't be directly setting variables in a linked `varinfo` like this unless you know for a fact that the value will be compatible with the constraints of the model.
 :::
+
+Now, we see that the constraint `m < x` is no longer satisfied.
+Hence, one might expect that if we try to evaluate the model using this `VarInfo`, we should obtain an error.
+Here, `evaluate!!` returns two things: the model's return value itself (which we defined above to be a `NamedTuple`), and the resulting `VarInfo` post-evaluation.
+
+```{julia}
+retval, ret_varinfo = DynamicPPL.evaluate!!(model, vi_linked, DefaultContext())
+getlogp(ret_varinfo)
+```
+
+But we don't get any errors!
+Indeed, we could even calculate the 'log probability density' for this evaluation.
+
+To understand this, we need to look at the actual value which was used during the model evaluation.
+We can glean this from the return value (or from the returned `VarInfo`, but the former is easier):
+
+```{julia}
+retval
+```
+
+We can see here that the model evaluation used the value of `m` that we provided, but the value of `x` was 'updated'.
+
+The reason for this is that internally in a model evaluation, we construct the transformation function from the internal to the model representation based on the *current* realizations in the model!
+That is, we take the `dist` in a `x ~ dist` expression _at model evaluation time_ and use that to construct the transformation, thus allowing it to change between model evaluations without invalidating the transformation.
+
+Knowing that the distribution of `x` depends on the value of `m`, we can now understand how the model representation of `x` got updated.
+The linked `VarInfo` does not store the model representation of `x`, but only its linked internal representation.
+So, what happened during the model evaluation above was that the linked internal representation of `x` – which was constructed using the _original_ value of `m` – was transformed back into a new model representation using a _different_ value of `m`.
+
+We can reproduce the 'new' value of `x` by performing these transformations manually:
+
+```{julia}
+# Generate a fresh linked VarInfo (without the new / 'corrupted' values)
+vi_linked = link(vi, model)
+# See the linked internal representations
+DynamicPPL.getindex_internal(vi_linked, vn_m), DynamicPPL.getindex_internal(vi_linked, vn_x)
+```
+
+Now we update the value of `m` like we did before:
+
+```{julia}
+vi_linked[vn_m] = vi_linked[vn_x] + 1
+vi_linked[vn_m]
+```
+
+When evaluating the model, the distribution of `x` is now changed, and so is the corresponding inverse bijector:
+
+```{julia}
+new_dist_x = truncated(Normal(); lower=vi_linked[vn_m])
+new_f_inv = DynamicPPL.invlink_transform(new_dist_x)
+```
+
+and if we apply this to the internal representation of `x`:
+
+```{julia}
+new_f_inv(DynamicPPL.getindex_internal(vi_linked, vn_x))
+```
