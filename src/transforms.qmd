@@ -399,238 +399,88 @@ You can access $\log(|\det(\mathbf{J})|)$ (evaluated at the point $\mathbf{x}$) 
 
 ```{julia}
 # Reiterating the setup, just to be clear
-x = rand(LogNormal())
-f = B.bijector(LogNormal())
+original_dist = LogNormal()
+x = rand(original_dist)
+f = B.bijector(original_dist)
 y = f(x)
 transformed_dist = B.transformed(LogNormal(), f)
 
 println("log(q(y))     : $(logpdf(transformed_dist, y))")
-println("log(p(x))     : $(logpdf(LogNormal(), x))")
+println("log(p(x))     : $(logpdf(original_dist, x))")
 println("log(|det(J)|) : $(B.logabsdetjac(f, x))")
 ```
 
 from which you can see that the equation above holds.
 There are more functions available in the Bijectors.jl API; for full details do check out the [documentation](https://turinglang.org/Bijectors.jl/stable/).
-For example, `logpdf_with_trans` can directly give us $\log(q(\mathbf{y}))$:
+For example, `logpdf_with_trans` can directly give us $\log(q(\mathbf{y}))$ without going through the effort of constructing the bijector:
 
 ```{julia}
-B.logpdf_with_trans(LogNormal(), x, true)
+B.logpdf_with_trans(original_dist, x, true)
 ```
 
-## The need for bijectors in MCMC
+## The case for bijectors in MCMC
 
-Constraints pose a problem for pretty much any kind of numerical method, and sampling is no exception to this.
+Constraints pose a challenge for many numerical methods such as optimisation, and sampling is no exception to this.
 The problem is that for any value $x$ outside of the support of a constrained distribution, $p(x)$ will be zero, and the logpdf will be $-\infty$.
 Thus, any term that involves some ratio of probabilities (or equivalently, the logpdf)  will be infinite.
 
-::: {.callout-note}
-This post is already really long, and does not have quite enough space to explain either the Metropolis–Hastings or Hamiltonian Monte Carlo algorithms in detail.
-If you need more information on these, please read e.g. chapter 11 of Bishop.
-:::
+### Metropolis with rejection
 
-### Metropolis–Hastings: fine?
+To see the practical impact of this on sampling, let's attempt to sample from a log-normal distribution using a random walk Metropolis algorithm.
 
-This alone is not enough to cause issues for Metropolis–Hastings.
-Here's an extremely barebones implementation of a random walk Metropolis algorithm:
+One way of handling constraints is to simply reject any steps that would take us out of bounds.
+This is a barebones implementation which does precisely that:
 
 ```{julia}
 # Take a step where the proposal is a normal distribution centred around
-# the current value
-function mh_step(p, x)
+# the current value. Return the new value, plus a flag to indicate whether
+# the new value was in bounds.
+function mh_step(logp, x, in_bounds)
     x_proposed = rand(Normal(x, 1))
-    acceptance_prob = min(1, p(x_proposed) / p(x))
-    return if rand() < acceptance_prob
-        x_proposed
+    in_bounds(x_proposed) || return (x, false)  # bounds check
+    acceptance_logp = logp(x_proposed) - logp(x)
+    return if log(rand()) < acceptance_logp
+        (x_proposed, true)  # successful step
     else
-        x
+        (x, true)  # failed step
     end
 end
 
 # Run a random walk Metropolis sampler.
-# `p`  : a function that takes `x` and returns the pdf of the distribution
-#        we're trying to sample from (up to a constant multiplicative factor)
-# `x0` : the initial state
-function mh(p, x0, n_samples)
+# `logp`      : a function that takes `x` and returns the log pdf of the
+#               distribution we're trying to sample from (up to a constant
+#               additive factor)
+# `n_samples` : the number of samples to draw
+# `in_bounds` : a function that takes `x` and returns whether `x` is within
+#               the support of the distribution
+# `x0`        : the initial value
+# Returns a vector of samples, plus the number of times we went out of bounds.
+function mh(logp, n_samples, in_bounds; x0=1.0)
     samples = []
     x = x0
+    n_out_of_bounds = 0
     for _ in 2:n_samples
-        x = mh_step(p, x)
+        x, inb = mh_step(logp, x, in_bounds)
+        if !inb
+            n_out_of_bounds += 1
+        end
         push!(samples, x)
     end
-    return samples
+    return (samples, n_out_of_bounds)
 end
 ```
 
-With this we can sample from a log-normal distribution just fine:
+::: {.callout-note}
+In the MH algorithm, we technically do not need to explicitly check the proposal, because for any $x \leq 0$, we have that $p(x) = 0$; thus, the acceptance probability will be zero.
+However, doing so here allows us to track how often this happens, and also illustrates the general principle of handling constraints by rejection.
+:::
+
+Now to actually perform the sampling:
 
 ```{julia}
-p(x) = pdf(LogNormal(), x)
-samples_with_mh = mh(p, 1.0, 5000)
-histogram(samples_with_mh, bins=0:0.1:5; xlims=(0, 5))
-```
-
-In this MH implementation, the only place where $p(x)$ comes into play is in the acceptance probability.
-
-As long as we make sure to start the sampling at a point within the support of the distribution, `p(x)` will be nonzero.
-If the proposal step generates an `x_proposal` that is outside the support, `p(x_proposal)` will be zero, and the acceptance probability `p(x_proposal)/p(x)` will be zero.
-So such a step will never be accepted, and the sampler will continue to stay within the support of the distribution.
-
-Although this does mean that we may find ourselves having a higher reject rate than usual, and thus less efficient sampling, it at least does not cause the algorithm to become unstable or crash.
-
-### Hamiltonian Monte Carlo: not so fine
-
-The _real_ problem comes with gradient-based methods like Hamiltonian Monte Carlo (HMC).
-Here's an equally barebones implementation of HMC.
-
-```{julia}
-using LinearAlgebra: I
-import ForwardDiff
-
-# Really basic leapfrog integrator.
-# `z`        : position
-# `r`        : momentum
-# `timestep` : size of one integration step
-# `nsteps`   : number of integration steps
-# `dEdz`     : function that returns the derivative of the energy with respect
-#              to `z`. The energy is the negative logpdf of the distribution
-#              we're trying to sample from.
-function leapfrog(z, r, timestep, nsteps, dEdz)
-    function step_inner(z, r)
-        # One small step for r, one giant leap for z
-        r -= (timestep / 2) * dEdz(z)
-        z += timestep * r
-        # (and then one more small step for r)
-        r -= (timestep / 2) * dEdz(z)
-        return (z, r)
-    end
-    for _ in 1:nsteps
-        z, r = step_inner(z, r)
-    end
-    (isnan(z) || isnan(r)) && error("Numerical instability encountered in leapfrog")
-    return (z, -r)
-end
-
-# Take one HMC step.
-# `z` : current position
-# `E` : function that returns the energy (negative logpdf) at `z`
-# Other arguments are as above
-function hmc_step(z, E, dEdz, integ_timestep, integ_nsteps)
-    # Generate new momentum
-    r = randn()
-    # Integrate the Hamiltonian dynamics
-    z_new, r_new = leapfrog(z, r, integ_timestep, integ_nsteps, dEdz)
-    # Calculate Hamiltonian
-    H = E(z) + 0.5 * sum(r .^ 2)
-    H_new = E(z_new) + 0.5 * sum(r_new .^ 2)
-    # Acceptance criterion
-    accept_prob = min(1, exp(H - H_new))
-    return if rand() < accept_prob
-        z_new
-    else
-        z
-    end
-end
-
-# Run HMC.
-# `z0` : initial position
-# Other arguments are as above
-function hmc(z0, E, dEdz, nsteps; integ_timestep=0.1, integ_nsteps=100)
-    samples = [z0]
-    z = z0
-    for _ in 2:nsteps
-        z = hmc_step(z, E, dEdz, integ_timestep, integ_nsteps)
-        push!(samples, z)
-    end
-    return samples
-end
-```
-
-Okay, that's our HMC set up.
-Now, let's try to sample from a log-normal distribution:
-
-```{julia}
-#| error: true
-p(x) = pdf(LogNormal(), x)
-E(x) = -log(p(x))
-dEdz(x) = ForwardDiff.derivative(E, x)
-samples_with_hmc = hmc(1.0, E, dEdz, 5000)
-histogram(samples_with_hmc, bins=0:0.1:5; xlims=(0, 5))
-```
-
-Eeeek! What happened?
-It turns out that evaluating the gradient of the energy at any point outside the support of the distribution is not possible:
-
-```{julia}
-dEdz(-1)
-```
-
-This is because $p(x)$ is 0, and hence $E(x) = -\log(p(x))$ is $\infty$ outside the support.
-If we try to evaluate the gradient at such a point, it's simply undefined, because arithmetic on infinity doesn't make sense:
-
-```{julia}
-Inf - Inf
-```
-
-To really pinpoint where this is happening, we need to look into the HMC leapfrog integration, specifically these lines:
-
-```julia
-r -= (timestep / 2) * dEdz(z)   #  (1)
-z += timestep * r               #  (2)
-r -= (timestep / 2) * dEdz(z)   #  (3)
-```
-
-Here, `z` is the position and `r` the momentum.
-Since we start our sampler inside the support of the distribution (by supplying a good initial point), `dEdz(z)` will start off being well-defined on line (1).
-However, after `r` is updated on line (1), `z` is updated again on line (2), and _this_ value of `z` may well be outside of the support.
-At this point, `dEdz(z)` will be `NaN`, and the final update to `r` on line (3) will also cause it to be `NaN`.
-
-Even if we're lucky enough for an individual integration step to not move `z` outside the support, there are many integration steps per sampler step, and many sampler steps, and so the chances of this happening at some point are quite high.
-
-It's possible to choose our integration parameters carefully to reduce the risk of this happening.
-For example, we could set the integration timestep to be _really_ small, thus reducing the chance of making a move outside the support.
-But that will just lead to a very slow exploration of parameter space, and in general, we should like to avoid this problem altogether.
-
-### Rescuing HMC
-
-Perhaps unsurprisingly, the answer to this is to transform the underlying distribution to an unconstrained one and sample from that instead.
-However, we have to make sure that we include the pesky Jacobian term when sampling from the transformed distribution.
-That's where Bijectors.jl can come in.
-
-The main change we need to make is to pass a modified probability density to our HMC sampler.
-Recall that
-
-$$\log(q(\mathbf{y})) = \log(p(\mathbf{x})) - \log(|\det(\mathbf{J})|).$$
-
-Instead of passing $E = -\log(p(\mathbf{x})$, we will instead pass $E = -\log(q(\mathbf{y}))$, meaning that the HMC sampler sees the transformed distribution $q(y)$ rather than the original distribution $p(x)$.
-Conveniently, Bijectors.jl lets us calculate $\log(q(y))$ using `logpdf_with_trans(p, x, true)`:
-
-```{julia}
-d = LogNormal()
-f = B.bijector(d)     # Transformation function
-f_inv = B.inverse(f)  # Inverse transformation function
-
-function logq(y)
-    x = f_inv(y)
-    return B.logpdf_with_trans(d, x, true)
-end
-E(z) = -logq(z)
-dEdz(z) = ForwardDiff.derivative(E, z)
-```
-
-Now, because our transformed distribution is unconstrained, we can evaluate `E` and `dEdz` at any point, and sample with more confidence:
-
-```{julia}
-samples_with_hmc = hmc(1.0, E, dEdz, 5000)
-samples_with_hmc[1:5]
-```
-
-There aren't any sampling errors this time, thankfully!
-We have to remember that when we run HMC on this, it will give us back samples of `y`, not `x`.
-So we can untransform them:
-
-```{julia}
-samples_with_hmc_untransformed = f_inv(samples_with_hmc)
-histogram(samples_with_hmc_untransformed, bins=0:0.1:5; xlims=(0, 5))
+logp(x) = logpdf(LogNormal(), x)
+samples, n_out_of_bounds = mh(logp, 10000, x -> x > 0)
+histogram(samples, bins=0:0.1:5; xlims=(0, 5))
 ```
 
 How do we know that this has sampled correctly?
@@ -640,12 +490,93 @@ For our log-normal distribution, we set $\mu = 0$ and $\sigma = 1$, so:
 
 ```{julia}
 println("expected mean: $(exp(0 + (1^2/2)))")
-println("  actual mean: $(mean(samples_with_hmc_untransformed))")
+println("  actual mean: $(mean(samples))")
 ```
 
-The importance of the Jacobian term here isn't to enable sampling _per se_.
-Because the resulting distribution is unconstrained, we could have still sampled from it without using the Jacobian.
-However, adding the Jacobian is what ensures that when we un-transform the samples, we get the correct distribution.
+### Metropolis with transformation
+
+The issue with this is that many of the sampling steps are unproductive, in that they bring us to the region of $x \leq 0$ and get rejected:
+
+```{julia}
+println("went out of bounds $n_out_of_bounds/10000 times")
+```
+
+And this could have been even worse if we had chosen a wider proposal distribution in the Metropolis step, or if the support of the distribution was narrower!
+In general, we probably don't want to have to re-parameterise our proposal distribution each time we sample from a distribution with different constraints.
+
+This is where the transformation functions from Bijectors.jl come in: we can use them to map the distribution to an unconstrained one and sample from *that* instead.
+Since the sampler only ever sees an unconstrained distribution, it doesn't have to worry about checking for bounds.
+
+To make this happen, instead of passing $\log(p(x))$ to the sampler, we pass $\log(q(y))$.
+This can be obtained using the `Bijectors.logpdf_with_trans` function that was introduced above.
+
+```{julia}
+d = LogNormal()
+f = B.bijector(d)     # Transformation function
+f_inv = B.inverse(f)  # Inverse transformation function
+function logq(y)
+    x = f_inv(y)
+    return B.logpdf_with_trans(d, x, true)
+end
+samples_transformed, _ = mh(logq, 10000, x -> true);
+```
+
+Now, this process gives us samples that have been transformed, so we need to un-transform them to get the samples from the original distribution:
+
+```{julia}
+samples_untransformed = f_inv(samples_transformed)
+histogram(samples_untransformed, bins=0:0.1:5; xlims=(0, 5))
+```
+
+We can check the mean of the samples too, to see that it is what we expect:
+
+```{julia}
+println("expected mean: $(exp(0 + (1^2/2)))")
+println("  actual mean: $(mean(samples_untransformed))")
+```
+
+### Which one is better?
+
+In the subsections above, we've seen two different methods of sampling from a constrained distribution:
+
+1. Sample directly from the distribution and reject any samples outside of its support.
+2. Transform the distribution to an unconstrained one and sample from that instead.
+
+(Note that both of these methods are applicable to other samplers as well, such as Hamiltonian Monte Carlo.)
+
+Of course, the question then becomes which one of these is better.
+We might look at the sample means above to see which one is 'closer' to the expected mean, but that's not a very robust method because the sample mean is itself random.
+What we could do is to perform both methods many times and see how reliable the sample mean is.
+
+```{julia}
+function get_sample_mean(; transform)
+    if transform
+       # Sample from transformed distribution
+       samples = f_inv(first(mh(logq, 10000, x -> true)))
+    else
+       # Sample from original distribution and reject if out of bounds
+       samples = first(mh(logp, 10000, x -> x > 0))
+    end
+    return mean(samples)
+end
+```
+
+```{julia}
+means_with_rejection = [get_sample_mean(; transform=false) for _ in 1:1000]
+mean(means_with_rejection), var(means_with_rejection)
+```
+
+```{julia}
+means_with_transformation = [get_sample_mean(; transform=true) for _ in 1:1000]
+mean(means_with_transformation), var(means_with_transformation)
+```
+
+We can see from this small study that although both methods give us the correct mean (on average), the method with the transformation is more reliable, in that the variance is much lower!
+
+### What happens without the Jacobian?
+
+In the transformation method above, we used `Bijectors.logpdf_with_trans` to calculate the log probability density of the transformed distribution.
+This function makes sure to include the Jacobian term when performing the transformation, and this is what makes sure that when we un-transform the samples, we get the correct distribution.
 
 The next code block shows what happens if we don't include the Jacobian term.
 In this `logq_wrong`, we've un-transformed `y` to `x` and calculated the logpdf with respect to its original distribution.
@@ -654,17 +585,16 @@ This is exactly the same mistake that we made at the start of this article with 
 ```{julia}
 function logq_wrong(y)
     x = f_inv(y)
-    return logpdf(d, x)
+    return logpdf(d, x)  # no Jacobian term!
 end
-E(z) = -logq_wrong(z)
-dEdz(z) = ForwardDiff.derivative(E, z)
-samples_questionable = hmc(1.0, E, dEdz, 5000)
+samples_questionable, _ = mh(logq_wrong, 100000, x -> true)
 samples_questionable_untransformed = f_inv(samples_questionable)
 
 println("mean: $(mean(samples_questionable_untransformed))")
 ```
 
-You can see that even though the sampling ran fine without errors, the mean is completely wrong.
+You can see that even though we used ten times more samples, the mean is quite wrong, which implies that our samples are not being drawn from the correct distribution.
+
 
 ## Linked and unlinked VarInfos in DynamicPPL
 
@@ -800,6 +730,7 @@ end
 
 sample(demo2(), HMC(0.1, 3), 3);
 ```
+
 
 (Here, the check on `if x isa AbstractFloat` prevents the printing from occurring during computation of the derivative.)
 You can see that during the three sampling steps, `istrans` is always kept as `true`.
