@@ -1,0 +1,221 @@
+---
+title: "AD terminology"
+engine: julia
+---
+
+This is a lovely tutorial that explains forward- and reverse-mode AD: [https://rufflewind.com/2016-12-30/reverse-mode-automatic-differentiation](https://rufflewind.com/2016-12-30/reverse-mode-automatic-differentiation)
+
+## Computation graph
+
+To illustrate how AD works, we need an example where multiple operations (such as addition, multiplication, ...) are composed together.
+Let's use the function
+
+$$f(x, y) = x^2 + \sin(x + y)
+\newcommand{deriv}[2]{\partial #1/\partial #2}
+\newcommand{derivf}[2]{\frac{\partial #1}{\partial #2}}$$
+
+The first step towards understanding this is to build a computation graph, where each operation is assigned to a single node.
+The 'input' nodes are just $x$ and $y$ themselves.
+We then have some intermediate nodes, which we'll assign different letters:
+
+$$\begin{align*}
+p &= x^2 \\
+q &= x + y \\
+r &= \sin(q)
+\end{align*}$$
+
+Finally, we have the output node, which is the sum of the two intermediate nodes:
+
+$$f = p + r$$
+
+In Julia, we have:
+
+```{julia}
+f(x, y) = x^2 + sin(x + y)
+```
+
+Suppose we wanted to evaluate this (and its gradient) at the point $(x, y) = (1, 2)$.
+
+```{julia}
+x_val, y_val = 1.0, 2.0
+
+f(x_val, y_val)
+```
+
+## The derivative
+
+With this example, we can calculate some analytic derivatives ourselves
+
+$$\begin{align*}
+\frac{\partial f}{\partial x} &= 2x + \cos(x + y) \\
+\frac{\partial f}{\partial y} &= \cos(x + y)
+\end{align*}$$
+
+and thereby implement them in Julia:
+
+```{julia}
+grad_f(x, y) = [2x + cos(x + y), cos(x + y)]
+
+grad_f(x_val, y_val)
+```
+
+We'll use this function to check the correctness of our AD implementation.
+
+## Forward-mode AD
+
+The aim of this section will be to write _something_ that can calculate the gradient of $f$ with respect to $x$ and $y$.
+We'll start with forward-mode AD, which is arguably the simpler of the two.
+
+As explained in the tutorial linked above, the idea behind forward-mode AD is that along with every node $n$, we also keep track of its derivative $\deriv{n}{i}$ for some input $i$.
+
+We begin with our input nodes $x$ and $y$, for which their derivatives are $\deriv{x}{i}$  and $\deriv{y}{i}$.
+When we actually perform the derivative calculation, we'll set the input variable $i$ to be either $x$ or $y$.
+If $i$ is set to $x$, then $\deriv{x}{i} = \deriv{x}{x} = 1$ and $\deriv{y}{i} = \deriv{y}{x} = 0$.
+However, for now, we'll leave $i$ as an arbitrary input.
+
+For our intermediate nodes, we need to invoke the chain rule:
+
+$$\derivf{p}{i} = \derivf{p}{x} \cdot \derivf{x}{i} + \derivf{p}{y} \cdot \derivf{y}{i}$$
+
+We know the values of $\deriv{x}{i}$ and $\deriv{y}{i}$, which means that we only need to specify $\deriv{p}{x}$ and $\deriv{p}{y}$.
+From the definition of $p = x^2$, we have $\deriv{p}{x} = 2x$ and $\deriv{p}{y} = 0$.
+
+Practically speaking, we can achieve this using an operator-overloading approach.
+Normally, mathematical operators take Float inputs and return Float inputs.
+To perform forward-mode AD, we'll start by defining a custom type `FNode` that stores not only the value of the node $n$, but also its derivative $\deriv{n}{i}$.
+
+```{julia}
+struct FNode
+    value::Float64
+    deriv::Float64
+end
+```
+
+We can then start to define new methods for the mathematical operations such that they take an input node and return an output node.
+For example, if we have a node $n_1$ (with associated derivative $\deriv{n_1}{i}$) and we raise it to the power of $k$ to get a new node $n_2$, then we should have that
+
+$$\begin{align*}
+n_2 &= (n_1)^k \\[5pt]
+\derivf{n_2}{i} &= \derivf{n_2}{n_1} \cdot \derivf{n_1}{i} = k (n_1)^{k-1} \cdot \derivf{n_1}{i}
+\end{align*}$$
+
+So, given a node which contains $n_1$ and its derivative $\deriv{n_1}{i}$, we have all the information we need to calculate $n_2$ and its derivative $\deriv{n_2}{i}$.
+
+```{julia}
+function Base.:^(n1::FNode, k::Integer)
+  n2_value = n1.value^k
+  n2_deriv = k * n1.value^(k-1) * n1.deriv
+  return FNode(n2_value, n2_deriv)
+end
+```
+
+In a similar way, we can define the other operations we need to calculate the gradient of our original function $f$.
+
+```{julia}
+function Base.:+(n1::FNode, n2::FNode)
+  n3_value = n1.value + n2.value
+  n3_deriv = n1.deriv + n2.deriv
+  return FNode(n3_value, n3_deriv)
+end
+
+function Base.sin(n1::FNode)
+  n2_value = sin(n1.value)
+  n2_deriv = cos(n1.value) * n1.deriv
+  return FNode(n2_value, n2_deriv)
+end
+```
+
+To get $\deriv{f}{x}$, it turns out that we just need to evaluate the function $f$ using `FNode`s as inputs rather than the plain Floats.
+But what _are_ our input `FNode`s?
+At this point, we need to choose which input we are differentiating with respect to.
+Say we want to calculate $\deriv{f}{x}$.
+This means that our input node for $x$ has a value of 1 and a derivative of 1:
+
+```{julia}
+x_node = FNode(x_val, 1.0);
+```
+
+whereas our input node for $y$ has a value of 2 and a derivative of 0, as described previously.
+
+```{julia}
+y_node = FNode(y_val, 0.0);
+```
+
+Now, observe:
+
+```{julia}
+output_node = f(x_node, y_node)
+```
+
+The first of these two numbers is the value of $f$, and the second is $\deriv{f}{x}$.
+
+To get $\deriv{f}{y}$, we would instead set the input node for $y$ to have a derivative of 1 and the input node for $x$ to have a derivative of 0.
+
+```{julia}
+df_dx = f(FNode(x_val, 1.0), FNode(y_val, 0.0)).deriv
+df_dy = f(FNode(x_val, 0.0), FNode(y_val, 1.0)).deriv
+
+[df_dx, df_dy]
+```
+
+Note that calling `f` with the nodes as inputs requires that the method `f` be polymorphic: for example, if we had written `f(x::Float64, y::Float64)` in our original definition, the call above would have failed since there is no method `f(::FNode, ::FNode)`.
+
+ForwardDiff.jl uses a similar approach to this: it calls the nodes `Dual`, and functions that can be differentiated by ForwardDiff must accept `Real` inputs (because `Dual` subtypes `Real`).
+
+
+## Forward-mode source code transformation
+
+Another way of implementing AD is to transform the function code itself.
+To make things easier for us, let's first rewrite the function such that each node has its own line:
+
+```{julia}
+function f2(x::Float64, y::Float64)
+    p = x^2
+    q = x + y
+    r = sin(q)
+    f = p + r
+    return f
+end
+```
+
+Notice here we have added the extra type annotations, so we cannot call `f2` with our nodes.
+
+```{julia}
+#| error: true
+f2(FNode(x_val, 1.0), FNode(y_val, 0.0))
+```
+
+Instead, what we are going to do is to define a new method that will act on both the inputs as well as their derivatives.
+At each line, it will calculate both the value of the node itself, and also propagate the derivatives.
+It will look like this:
+
+```{julia}
+function f2(x::Float64, dx::Float64, y::Float64, dy::Float64)
+    p, dp = x^2, 2x*dx
+    q, dq = x + y, dx + dy
+    r, dr = sin(q), cos(q) * dq
+    f, df = p + r, dp + dr
+    return f, df
+end
+```
+
+Here, the variable `dx` represents $\deriv{x}{i}$, and likewise for the other `d`-prefixed variables.
+
+Suppose we have this function.
+We can then call it with the appropriate inputs to get the same gradient as before:
+
+```{julia}
+df_dx = f2(x_val, 1.0, y_val, 0.0)[2]
+df_dy = f2(x_val, 0.0, y_val, 1.0)[2]
+
+[df_dx, df_dy]
+```
+
+Now, this isn't very _automatic_: we've manually defined the new method for `f2`.
+However, we could use a Julia macro to perform this source code transformation.
+
+
+TODO
+
+
+## ChainRules forward-mode

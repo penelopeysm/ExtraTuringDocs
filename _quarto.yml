@@ -7,8 +7,7 @@ book:
   date: "2024-11-18"
   chapters:
     - index.qmd
-    - src/transforms.qmd
-    - src/chain.qmd
+    - src/ad.qmd
 
 format:
   html:
