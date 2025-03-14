@@ -61,7 +61,7 @@ grad_f(x_val, y_val)
 
 We'll use this function to check the correctness of our AD implementation.
 
-## Forward-mode AD
+## Forward-mode operator overloading
 
 The aim of this section will be to write _something_ that can calculate the gradient of $f$ with respect to $x$ and $y$.
 We'll start with forward-mode AD, which is arguably the simpler of the two.
@@ -190,7 +190,7 @@ At each line, it will calculate both the value of the node itself, and also prop
 It will look like this:
 
 ```{julia}
-function f2(x::Float64, dx::Float64, y::Float64, dy::Float64)
+function _f2(x::Float64, dx::Float64, y::Float64, dy::Float64)
     p, dp = x^2, 2x*dx
     q, dq = x + y, dx + dy
     r, dr = sin(q), cos(q) * dq
@@ -205,8 +205,8 @@ Suppose we have this function.
 We can then call it with the appropriate inputs to get the same gradient as before:
 
 ```{julia}
-df_dx = f2(x_val, 1.0, y_val, 0.0)[2]
-df_dy = f2(x_val, 0.0, y_val, 1.0)[2]
+df_dx = _f2(x_val, 1.0, y_val, 0.0)[2]
+df_dy = _f2(x_val, 0.0, y_val, 1.0)[2]
 
 [df_dx, df_dy]
 ```
@@ -214,8 +214,102 @@ df_dy = f2(x_val, 0.0, y_val, 1.0)[2]
 Now, this isn't very _automatic_: we've manually defined the new method for `f2`.
 However, we could use a Julia macro to perform this source code transformation.
 
+```{julia}
+import MacroTools as MT
 
-TODO
+macro forward_ad(fn_expr)
+    return _forward_ad(fn_expr)
+end
 
+function _forward_ad(fn_expr)
+    fn_components = MT.splitdef(fn_expr)
 
-## ChainRules forward-mode
+    # Modify function arguments. For every function argument
+    # that looks like `x::Float64`, we add a new argument `dx::Float64`.
+    new_args = []
+    for expr in fn_components[:args]
+        push!(new_args, deepcopy(expr))
+        expr.args[1] = Symbol("d$(expr.args[1])")
+        push!(new_args, expr)
+    end
+
+    # Shorthand function to prefix a symbol with `d`
+    d(s) = Symbol("d", s)
+
+    # Modify function body. For every line in the function body, we need to
+    # match the pattern `lhs = ...` and replace it with `lhs, dlhs = ...`.
+    new_body = map(MT.rmlines(fn_components[:body]).args) do expr
+        # `return x` -> `return x, dx`
+        MT.@capture(expr, return retval_) && return :(return $retval, $(d(retval)))
+        # `a = b + c` -> `a, da = b + c, db + dc`
+        MT.@capture(expr, lhs_ = rhs1_ + rhs2_) && return :(($lhs, $(d(lhs))) = ($rhs1 + $rhs2, $(d(rhs1)) + $(d(rhs2))))
+        # `a = b^c` -> `a, da = b^c, c * b^(c-1) * db`
+        MT.@capture(expr, lhs_ = rhs1_ ^ rhs2_) && return :(($lhs, $(d(lhs))) = ($rhs1 ^ $rhs2, $rhs2 * $rhs1^($rhs2-1) * $(d(rhs1))))
+        # `a = sin(b)` -> `a, da = sin(b), cos(b) * db`
+        MT.@capture(expr, lhs_ = sin(rhs_)) && return :(($lhs, $(d(lhs))) = (sin($rhs), cos($rhs) * $(d(rhs))))
+        # Something else we don't know how to do
+        error("Don't know how to AD the expression: $expr")
+    end
+
+    # Put the now modified function back together
+    fn_components[:args] = new_args
+    fn_components[:body].args = new_body
+    return MT.combinedef(fn_components)
+end
+```
+
+Let's see what the macro expands to:
+
+```{julia}
+@macroexpand @forward_ad function f2(x::Float64, y::Float64)
+    p = x^2
+    q = x + y
+    r = sin(q)
+    f = p + r
+    return f
+end
+```
+
+This looks pretty much correct, so let's run it now:
+
+```{julia}
+@forward_ad function f2(x::Float64, y::Float64)
+    p = x^2
+    q = x + y
+    r = sin(q)
+    f = p + r
+    return f
+end
+
+df_dx = f2(x_val, 1.0, y_val, 0.0)[2]
+df_dy = f2(x_val, 0.0, y_val, 1.0)[2]
+
+[df_dx, df_dy]
+```
+
+## ChainRules.jl
+
+In both of the above approaches, we have duplicated the same information about how to calculate the derivative of a given function.
+For example, we had in the operator overloading case
+
+```julia
+n2_value = sin(n1.value)
+n2_deriv = cos(n1.value) * n1.deriv
+```
+
+and in the source code transformation case
+
+```julia
+MT.@capture(expr, lhs_ = sin(rhs_)) && return :(($lhs, $(d(lhs))) = (sin($rhs), cos($rhs) * $(d(rhs))))
+```
+
+While this works correctly, there is a shortcoming in that we've had to encode the same information twice in our two different implementations.
+What we've been trying to encode is that for
+
+$$g = \sin f,$$
+
+it must be that
+
+$$\dot{g} = (\cos f) \cdot \dot{f},$$
+
+where we've used $\dot{f}$ to represent the derivative of $f$ with respect to some input (i.e., what we've been calling $\deriv{f}{i}$ up until now).
