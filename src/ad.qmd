@@ -233,28 +233,32 @@ function _forward_ad(fn_expr)
         push!(new_args, expr)
     end
 
-    # Shorthand function to prefix a symbol with `d`
-    d(s) = Symbol("d", s)
-
     # Modify function body. For every line in the function body, we need to
     # match the pattern `lhs = ...` and replace it with `lhs, dlhs = ...`.
-    new_body = map(MT.rmlines(fn_components[:body]).args) do expr
-        # `return x` -> `return x, dx`
-        MT.@capture(expr, return retval_) && return :(return $retval, $(d(retval)))
-        # `a = b + c` -> `a, da = b + c, db + dc`
-        MT.@capture(expr, lhs_ = rhs1_ + rhs2_) && return :(($lhs, $(d(lhs))) = ($rhs1 + $rhs2, $(d(rhs1)) + $(d(rhs2))))
-        # `a = b^c` -> `a, da = b^c, c * b^(c-1) * db`
-        MT.@capture(expr, lhs_ = rhs1_ ^ rhs2_) && return :(($lhs, $(d(lhs))) = ($rhs1 ^ $rhs2, $rhs2 * $rhs1^($rhs2-1) * $(d(rhs1))))
-        # `a = sin(b)` -> `a, da = sin(b), cos(b) * db`
-        MT.@capture(expr, lhs_ = sin(rhs_)) && return :(($lhs, $(d(lhs))) = (sin($rhs), cos($rhs) * $(d(rhs))))
-        # Something else we don't know how to do
-        error("Don't know how to AD the expression: $expr")
-    end
+    new_body = map(_transform_single_expr, MT.rmlines(fn_components[:body]).args)
 
     # Put the now modified function back together
     fn_components[:args] = new_args
     fn_components[:body].args = new_body
     return MT.combinedef(fn_components)
+end
+
+# Shorthand function to prefix a symbol with `d`
+d(s) = Symbol("d", s)
+
+# Transform a single line in the original function body. This is where the actual
+# AD logic is implemented.
+function _transform_single_expr(expr::Expr)
+    # `return x` -> `return x, dx`
+    MT.@capture(expr, return retval_) && return :(return $retval, $(d(retval)))
+    # `a = b + c` -> `a, da = b + c, db + dc`
+    MT.@capture(expr, lhs_ = rhs1_ + rhs2_) && return :(($lhs, $(d(lhs))) = ($rhs1 + $rhs2, $(d(rhs1)) + $(d(rhs2))))
+    # `a = b^c` -> `a, da = b^c, c * b^(c-1) * db`
+    MT.@capture(expr, lhs_ = rhs1_ ^ rhs2_) && return :(($lhs, $(d(lhs))) = ($rhs1 ^ $rhs2, $rhs2 * $rhs1^($rhs2-1) * $(d(rhs1))))
+    # `a = sin(b)` -> `a, da = sin(b), cos(b) * db`
+    MT.@capture(expr, lhs_ = sin(rhs_)) && return :(($lhs, $(d(lhs))) = (sin($rhs), cos($rhs) * $(d(rhs))))
+    # Something else we don't know how to do
+    error("Don't know how to AD the expression: $expr")
 end
 ```
 
@@ -287,7 +291,7 @@ df_dy = f2(x_val, 0.0, y_val, 1.0)[2]
 [df_dx, df_dy]
 ```
 
-## ChainRules.jl
+## Abstracting the 'rule'
 
 In both of the above approaches, we have duplicated the same information about how to calculate the derivative of a given function.
 For example, we had in the operator overloading case
@@ -303,13 +307,128 @@ and in the source code transformation case
 MT.@capture(expr, lhs_ = sin(rhs_)) && return :(($lhs, $(d(lhs))) = (sin($rhs), cos($rhs) * $(d(rhs))))
 ```
 
-While this works correctly, there is a shortcoming in that we've had to encode the same information twice in our two different implementations.
-What we've been trying to encode is that for
+While both of these implementations work correctly, there is a shortcoming in that we've had to encode the same mathematical information twice in our two different implementations, namely that if:
 
 $$g = \sin f,$$
 
-it must be that
+then
 
-$$\dot{g} = (\cos f) \cdot \dot{f},$$
+$$\dot{g} = (\cos f) \cdot \dot{f}.$$
 
-where we've used $\dot{f}$ to represent the derivative of $f$ with respect to some input (i.e., what we've been calling $\deriv{f}{i}$ up until now).
+Here, $\dot{f}$ represents the derivative of $f$ with respect to some input; it's the same as what we've been calling $\deriv{f}{i}$ up until now.
+In the AD literature, $\dot{f}$ is often called the _tangent_.
+
+How can we capture this information in a way that is agnostic to the specific implementation of AD?
+One way is to allow the AD implementation to 'look up' the derivative for a given function.
+In Julia, every function has a unique type:
+
+```{julia}
+typeof(sin)
+```
+
+So, we can accomplish this by dispatching on the type of the function.
+We'll insert a print statement to prove that this method is actually being called:
+
+```{julia}
+function get_value_and_deriv(::typeof(sin), f, fdot)
+    println("Using rule for sin!")
+    value = sin(f)
+    deriv = cos(f) * fdot
+    return value, deriv
+end
+```
+
+Our operator-overloading implementation can now use this rule.
+
+```{julia}
+function Base.sin(n1::FNode)
+    n2_value, n2_deriv = get_value_and_deriv(sin, n1.value, n1.deriv)
+    return FNode(n2_value, n2_deriv)
+end
+
+# Calculate df/dx
+f(FNode(x_val, 1.0), FNode(y_val, 0.0)).deriv
+```
+
+And so can our source code transformation AD:
+
+```{julia}
+function _transform_single_expr(expr::Expr)
+    # `return x` -> `return x, dx`
+    MT.@capture(expr, return retval_) && return :(return $retval, $(d(retval)))
+    # `a = b + c` -> `a, da = b + c, db + dc`
+    MT.@capture(expr, lhs_ = rhs1_ + rhs2_) && return :(($lhs, $(d(lhs))) = ($rhs1 + $rhs2, $(d(rhs1)) + $(d(rhs2))))
+    # `a = b^c` -> `a, da = b^c, c * b^(c-1) * db`
+    MT.@capture(expr, lhs_ = rhs1_ ^ rhs2_) && return :(($lhs, $(d(lhs))) = ($rhs1 ^ $rhs2, $rhs2 * $rhs1^($rhs2-1) * $(d(rhs1))))
+
+    ####################################################
+    ### The other lines are the same as before - this is
+    ### the new line where we're using our new rule.    
+    ####################################################
+    # `a = sin(b)` -> `a, da = sin(b), cos(b) * db`
+    MT.@capture(expr, lhs_ = sin(rhs_)) && return :(($lhs, $(d(lhs))) = get_value_and_deriv(sin, $rhs, $(d(rhs))))
+
+    # Something else we don't know how to do
+    error("Don't know how to AD the expression: $expr")
+end
+
+@forward_ad function f2(x::Float64, y::Float64)
+    p = x^2
+    q = x + y
+    r = sin(q)
+    f = p + r
+    return f
+end
+
+# Calculate df/dx
+f2(x_val, 1.0, y_val, 0.0)[2]
+```
+
+## ChainRules.jl
+
+Extrapolating from this, we can imagine having an entire library of rules for different functions, which different AD backends could then hook into.
+This is precisely the motivation behind [ChainRules.jl](https://juliadiff.org/ChainRulesCore.jl/stable/index.html) and its associateed packages.
+
+Specifically, ChainRulesCore.jl provides the functionality for defining rules; ChainRules.jl contains the actual rules; and ChainRulesTestUtils.jl provides a set of tests to ensure that rules are implemented correctly.
+
+For forward-mode AD, rules can be specified using `ChainRulesCore.frule`.
+Just like our hand-rolled `get_value_and_deriv` function, this function dispatches on the type of the function being called.
+Its usage is best illustrated with an example:
+
+```{julia}
+using ChainRulesCore
+
+function ChainRulesCore.frule((fdot, xdot), ::typeof(sin), x)
+    return (sin(x), cos(x) * xdot)
+end
+```
+
+(You can see ChainRules's actual rule for `sin` [here](https://github.com/JuliaDiff/ChainRules.jl/blob/150c7a1d70cd40d1dc73d463ee641e199732e968/src/rulesets/Base/fastmath_able.jl#L18-L21); it's almost the same except for some performance optimisations.)
+
+The first argument to `frule` is a tuple, which contains the tangents of all the inputs.
+The remaining arguments are then the function to be differentiated, and its arguments.
+The function then needs to return a tuple containing the value of the primal and the tangent of the output.
+
+You may notice this `fdot`: what is its role here?
+It turns out that this is the tangent of _the function itself_.
+In the case of `sin`, the output does not depend on the function itself, so we can just ignore this.
+But if we had a callable struct which contained some information used in the calculation, like this:
+
+```julia
+struct CallableStruct
+    a::Float64
+end
+
+function (cs::CallableStruct)(x)
+    return cs.a * x
+end
+```
+
+then we would need to use that first tangent, `fdot`, to calculate the derivative.
+
+Thus, for example, if we were trying to differentiate a function `f(x1, x2, x3)`, then the appropriate function signature would be
+
+```julia
+frule((fdot, x1dot, x2dot, x3dot), ::typeof(f), x1, x2, x3)
+```
+
