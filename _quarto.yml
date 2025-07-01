@@ -8,6 +8,8 @@ book:
   chapters:
     - index.qmd
     - src/ad.qmd
+    - src/linear.qmd
+    - src/submodel.qmd
 
 format:
   html:

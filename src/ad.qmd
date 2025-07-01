@@ -109,6 +109,10 @@ function Base.:^(n1::FNode, k::Integer)
 end
 ```
 
+::: {.callout-note}
+This derivative is only correct if $k$ is itself a constant!
+:::
+
 In a similar way, we can define the other operations we need to calculate the gradient of our original function $f$.
 
 ```{julia}
@@ -190,12 +194,19 @@ At each line, it will calculate both the value of the node itself, and also prop
 It will look like this:
 
 ```{julia}
+# This struct is the same thing as FNode, but we'll give it a new name
+# to avoid confusion.
+struct ForwardADResult
+    value::Float64
+    deriv::Float64
+end
+
 function _f2(x::Float64, dx::Float64, y::Float64, dy::Float64)
     p, dp = x^2, 2x*dx
     q, dq = x + y, dx + dy
     r, dr = sin(q), cos(q) * dq
     f, df = p + r, dp + dr
-    return f, df
+    return ForwardADResult(f, df)
 end
 ```
 
@@ -205,8 +216,8 @@ Suppose we have this function.
 We can then call it with the appropriate inputs to get the same gradient as before:
 
 ```{julia}
-df_dx = _f2(x_val, 1.0, y_val, 0.0)[2]
-df_dy = _f2(x_val, 0.0, y_val, 1.0)[2]
+df_dx = _f2(x_val, 1.0, y_val, 0.0).deriv
+df_dy = _f2(x_val, 0.0, y_val, 1.0).deriv
 
 [df_dx, df_dy]
 ```
@@ -249,8 +260,8 @@ d(s) = Symbol("d", s)
 # Transform a single line in the original function body. This is where the actual
 # AD logic is implemented.
 function _transform_single_expr(expr::Expr)
-    # `return x` -> `return x, dx`
-    MT.@capture(expr, return retval_) && return :(return $retval, $(d(retval)))
+    # `return x` -> `return ForwardADResult(x, dx)`
+    MT.@capture(expr, return retval_) && return :(return $ForwardADResult($retval, $(d(retval))))
     # `a = b + c` -> `a, da = b + c, db + dc`
     MT.@capture(expr, lhs_ = rhs1_ + rhs2_) && return :(($lhs, $(d(lhs))) = ($rhs1 + $rhs2, $(d(rhs1)) + $(d(rhs2))))
     # `a = b^c` -> `a, da = b^c, c * b^(c-1) * db`
@@ -285,8 +296,8 @@ This looks pretty much correct, so let's run it now:
     return f
 end
 
-df_dx = f2(x_val, 1.0, y_val, 0.0)[2]
-df_dy = f2(x_val, 0.0, y_val, 1.0)[2]
+df_dx = f2(x_val, 1.0, y_val, 0.0).deriv
+df_dy = f2(x_val, 0.0, y_val, 1.0).deriv
 
 [df_dx, df_dy]
 ```
@@ -354,8 +365,8 @@ And so can our source code transformation AD:
 
 ```{julia}
 function _transform_single_expr(expr::Expr)
-    # `return x` -> `return x, dx`
-    MT.@capture(expr, return retval_) && return :(return $retval, $(d(retval)))
+    # `return x` -> `return ForwardADResult(x, dx)`
+    MT.@capture(expr, return retval_) && return :(return $ForwardADResult($retval, $(d(retval))))
     # `a = b + c` -> `a, da = b + c, db + dc`
     MT.@capture(expr, lhs_ = rhs1_ + rhs2_) && return :(($lhs, $(d(lhs))) = ($rhs1 + $rhs2, $(d(rhs1)) + $(d(rhs2))))
     # `a = b^c` -> `a, da = b^c, c * b^(c-1) * db`
@@ -381,7 +392,7 @@ end
 end
 
 # Calculate df/dx
-f2(x_val, 1.0, y_val, 0.0)[2]
+f2(x_val, 1.0, y_val, 0.0).deriv
 ```
 
 ## ChainRules.jl
@@ -409,6 +420,7 @@ The first argument to `frule` is a tuple, which contains the tangents of all the
 The remaining arguments are then the function to be differentiated, and its arguments.
 The function then needs to return a tuple containing the value of the primal and the tangent of the output.
 
+::: {.callout-note}
 You may notice this `fdot`: what is its role here?
 It turns out that this is the tangent of _the function itself_.
 In the case of `sin`, the output does not depend on the function itself, so we can just ignore this.
@@ -425,10 +437,73 @@ end
 ```
 
 then we would need to use that first tangent, `fdot`, to calculate the derivative.
+Thankfully, for the purposes of this tutorial we will ignore such a possibility.
+:::
 
-Thus, for example, if we were trying to differentiate a function `f(x1, x2, x3)`, then the appropriate function signature would be
+Thus, for example, if we were trying to differentiate a function `f(x1, x2, x3)`, then the appropriate signature would be
 
 ```julia
-frule((fdot, x1dot, x2dot, x3dot), ::typeof(f), x1, x2, x3)
+function ChainRulesCore.frule(
+    (fdot, x1dot, x2dot, x3dot),
+    ::typeof(f),
+    x1,
+    x2,
+    x3
+)
+    # ...
+end
 ```
 
+Let's try to hook into this rule system now so that we don't have to do it ourselves.
+
+```{julia}
+using ChainRulesCore: NoTangent, frule
+
+function _transform_single_expr(expr::Expr)
+    # `return x` -> `return ForwardADResult(x, dx)`
+    MT.@capture(expr, return retval_) && return :(return $ForwardADResult($retval, $(d(retval))))
+    # `a = b + c` -> `a, da = b + c, db + dc`
+    MT.@capture(expr, lhs_ = rhs1_ + rhs2_) && return :(($lhs, $(d(lhs))) = ($rhs1 + $rhs2, $(d(rhs1)) + $(d(rhs2))))
+    # `a = b^c` -> `a, da = b^c, c * b^(c-1) * db`
+    MT.@capture(expr, lhs_ = rhs1_ ^ rhs2_) && return :(($lhs, $(d(lhs))) = ($rhs1 ^ $rhs2, $rhs2 * $rhs1^($rhs2-1) * $(d(rhs1))))
+
+    ####################################################
+    ### We can use ChainRules.jl to handle all unary functions
+    ####################################################
+    if MT.@capture(expr, lhs_ = f_(rhs_))
+        return :(($lhs, $(d(lhs))) = frule((NoTangent(), $(d(rhs))), $f, $rhs))
+    end
+
+    # Something else we don't know how to do
+    error("Don't know how to AD the expression: $expr")
+end
+```
+
+::: {.callout-note}
+In this example, we have set `fdot` to _always_ be a sentinel value of `NoTangent()`.
+This is a special value that ChainRulesCore.jl uses to indicate that there is no meaningful way to differentiate `f` itself; however, it will fail for cases where `f` itself contains differentiable data.
+:::
+
+We could show that this works by running our old function, but to demonstrate that this actually uses the ChainRules.jl rules, we can instead try it out on a new function that uses the `cos` and `tan` functions, for which we haven't defined any rules ourselves.
+As mentioned earlier, the actual rules themselves are defined in ChainRules.jl, so we need to import it.
+
+```{julia}
+using ChainRules
+
+@forward_ad function f3(x::Float64, y::Float64)
+    p = cos(x)
+    q = tan(y)
+    f = p + q
+    return f
+end
+
+df_dx = f3(x_val, 1.0, y_val, 0.0).deriv
+df_dy = f3(x_val, 0.0, y_val, 1.0).deriv
+(df_dx, df_dy)
+```
+
+Let's compare this with the analytic derivative: for $f_3(x, y) = \cos(x) + \tan(y)$, we have that $\deriv{f_3}{x} = -\sin(x)$ and $\deriv{f_3}{y} = \sec^2(y)$.
+
+```{julia}
+(-sin(x_val), sec(y_val)^2)
+```

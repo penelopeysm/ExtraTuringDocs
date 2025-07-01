@@ -1,0 +1,80 @@
+---
+title: "Bayesian linear regression"
+engine: julia
+---
+
+Based on PRML §3.3.
+
+Notation:
+
+- $N$ = number of data points
+- $D$ = number of features
+- $\{\vec{x}_i\}, i=1,\ldots,N$ = features
+- $\{t_i\}, i=1,\ldots,N$ = target data
+
+Each data point $\vec{x}_i$ is a $D$-dimensional vector, and each target $t_i$ is a scalar.
+
+The model's parameters are:
+
+- $\vec{w}$ = weight vector (model parameters), a $D$-dimensional vector
+- $\beta$ = 'noise precision' (i.e. the inverse variance of the noise), a scalar
+
+We assume that each $t_i$ is a linear combination of the inputs plus some Gaussian noise.
+Thus the likelihood for each data point $(\vec{x}_i, t_i)$ is
+
+$$p(t_i | \vec{x}_i, \vec{w}) = \mathcal{N}(t_i | \vec{w}^T \vec{x}_i, 1/\beta)$$
+
+so the overall likelihood is
+
+$$\prod_i p(t_i | \vec{x}_i, \vec{w}) = \prod_i \mathcal{N}(t_i | \vec{w}^T \vec{x}_i, 1/\beta)$$
+
+That leaves the prior: we assume that $\vec{w}$ is distributed as a multivariate Gaussian with mean $\vec{m}_0$ and covariance matrix $\mathbf{S}_0$.
+
+In the book, the discussion treats $\beta$, $\vec{m}_0$, and $\mathbf{S}_0$ as known constants, and derives analytical formulae for the posterior distribution of $\vec{w}$ given these constants and the data.
+Specifically, the posterior distribution is
+
+$$p(\vec{w} | \{\vec{x}_i, t_i\}) = \mathcal{N}(\vec{w} | \vec{m}_N, \mathbf{S}_N)$$
+
+where
+
+$$\begin{align*}
+\vec{m}_N &= \mathbf{S}_N \left( \mathbf{S}_0^{-1} \vec{m}_0 + \beta \Phi^T \vec{t} \right) \\
+\mathbf{S}_N^{-1} &= \mathbf{S}_0^{-1} + \beta \Phi^T \Phi
+\end{align*}$$
+
+and $\mathbf{\Phi}$ is the **design matrix**, i.e.,  $N \times D$ matrix whose $i$-th row is $\vec{x}_i^T$:
+
+$$\mathbf{\Phi} = \begin{bmatrix}
+(\vec{x}_1)_1 & (\vec{x}_1)_2 & \ldots & (\vec{x}_1)_D \\
+(\vec{x}_2)_1 & (\vec{x}_2)_2 & \ldots & (\vec{x}_2)_D \\
+\vdots & \vdots & \ddots & \vdots \\
+(\vec{x}_N)_1 & (\vec{x}_N)_2 & \ldots & (\vec{x}_N)_D
+\end{bmatrix}$$
+
+::: {.callout-note}
+In other literature, the design matrix is often denoted as $\mathbf{X}$.
+In _PRML_, the inputs may be further transformed to generate $M$ new features $\vec{\phi}_j(\vec{x}_i)$ for $j = 0, \ldots, M-1$, hence the notation $\mathbf{\Phi}$.
+In this case, the design matrix $\mathbf{\Phi}$ would be $N \times M$, where the $i$-th row is a vector of the form $(\vec{\phi}_0(\vec{x}_i), \vec{\phi}_1(\vec{x}_i), \ldots, \vec{\phi}_{M-1}(\vec{x}_i))^T$.
+We ignore this here and assume that the input features have already undergone the necessary transformations.
+:::
+
+To simulate this with code and verify the formulae, we will have to choose concrete values for these.
+
+```{julia}
+beta = 1.0
+
+using Turing
+
+# t must be a vector of length N
+# x must be a N by D matrix, i.e. each row is one data point
+@model function linreg(t, x)
+    N, D = size(x)
+    m0 = zeros(D)
+    S0 = I(D)
+    w ~ MvNormal(m0, S0)
+    for i in 1:N
+        pred = dot(x[i, :], w)
+        t[i] ~ Normal(pred, 1 / sqrt(beta))
+    end
+end
+```
