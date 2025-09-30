@@ -1,0 +1,153 @@
+---
+title: "MCMC Sampling Options"
+engine: julia
+---
+
+```{julia}
+#| echo: false
+#| output: false
+using Pkg;
+Pkg.instantiate();
+```
+
+Markov chain Monte Carlo sampling in Turing.jl is performed using the `sample()` function.
+As described on the [Core Functionality page]({{< meta core-functionality >}}), single-chain and multiple-chain sampling can be done using, respectively,
+
+```julia
+sample(model, sampler, niters)
+sample(model, sampler, MCMCThreads(), niters, nchains)  # or MCMCSerial() or MCMCDistributed()
+```
+
+On top of this, both methods also accept a number of keyword arguments that allow you to control the sampling process.
+This page will detail these options.
+
+To begin, let's create a simple model:
+
+```{julia}
+using Turing
+
+@model function demo_model()
+    x ~ Normal()
+    y ~ Normal(x)
+    4.0 ~ Normal(y)
+    return nothing
+end
+```
+
+## Controlling progress logging
+
+Progress logging can be controlled with the `progress` keyword argument.
+The exact values that can be used depend on whether you are using single-chain or multi-chain sampling.
+
+For single-chain sampling, `progress=true` and `progress=false` enable and disable the progress bar, respectively.
+
+For multi-chain sampling, `progress` can take the following values:
+
+- `:none` or `false`: no progress bar
+- (default) `:overall` or `true`: creates one overall progress bar for all chains
+- `:perchain`: creates one overall progress bar, plus one extra progress bar per chain (note that this can lead to visual clutter if you have many chains)
+
+If you want to globally enable or disable the progress bar, you can use:
+
+```{julia}
+Turing.setprogress!(false);   # or true
+```
+
+(This handily also disables progress logging for the rest of this document.)
+
+## Controlling the output type
+
+By default, the results of MCMC sampling are bundled up in an `MCMCChains.Chains` object.
+
+```{julia}
+chn = sample(demo_model(), HMC(0.1, 20), 5)
+typeof(chn)
+```
+
+If you wish to use a different chain format provided in another package, you can specify the `chain_type` keyword argument.
+You should refer to the documentation of the respective package for exact details.
+
+Another situation where specifying `chain_type` can be useful is when you want to obtain the raw MCMC outputs as a vector of transitions.
+This can be used for profiling or debugging purposes (often, chain construction can take a surprising amount of time compared to sampling, especially for very simple models).
+To do so, you can use `chain_type=Any` (i.e., do not convert the output to any specific chain format):
+
+```{julia}
+transitions = sample(demo_model(), MH(), 5; chain_type=Any)
+typeof(transitions)
+```
+
+## Specifying initial parameters
+
+In Turing.jl, initial parameters for MCMC sampling can be specified using the `initial_params` keyword argument.
+
+For single-chain sampling, the AbstractMCMC interface generally expects that you provide a completely flattened vector of parameters.
+
+```{julia}
+chn = sample(demo_model(), MH(), 5; initial_params=[1.0, -5.0])
+chn[:x][1], chn[:y][1]
+```
+
+::: {.callout-note}
+Note that a number of samplers use warm-up steps by default (see the [Thinning and Warmup section below](#thinning-and-warmup)), so `chn[:param][1]` may not correspond to the exact initial parameters you provided.
+`MH()` does not do this, which is why we use it here.
+:::
+
+Note that for Turing models, the use of `Vector` can be extremely error-prone as the order of parameters in the flattened vector is not always obvious (especially if there are parameters with non-trivial types).
+In general, parameters should be provided in the order they are defined in the model.
+A relatively 'safe' way of obtaining parameters in the correct order is to first generate a `VarInfo`, and then linearise that:
+
+```{julia}
+using DynamicPPL
+vi = VarInfo(demo_model())
+initial_params = vi[:]
+```
+
+To avoid this situation, you can also use `NamedTuple` to specify initial parameters.
+
+```{julia}
+chn = sample(demo_model(), MH(), 5; initial_params=(y=2.0, x=-6.0))
+chn[:x][1], chn[:y][1]
+```
+
+This works even for parameters with more complex types.
+
+```{julia}
+@model function demo_complex()
+    x ~ LKJCholesky(3, 0.5)
+    y ~ MvNormal(zeros(3), I)
+end
+init_x, init_y = rand(LKJCholesky(3, 0.5)), rand(MvNormal(zeros(3), I))
+chn = sample(demo_complex(), MH(), 5; initial_params=(x=init_x, y=init_y));
+```
+
+::: {.callout-important}
+## Upcoming changes in Turing v0.41
+
+In Turing v0.41, instead of providing _initial parameters_, users will have to provide what is conceptually an _initialisation strategy_.
+The keyword argument is still `initial_params`, but the permitted values will either be:
+
+- `InitFromPrior()`: generate initial parameters by sampling from the prior
+- `InitFromUniform(lower, upper)`: generate initial parameters by sampling uniformly from the given bounds in linked space
+- `InitFromParams(namedtuple_or_dict)`: use the provided initial parameters, supplied either as a `NamedTuple` or a `Dict{<:VarName}`
+
+Initialisation with `Vector` will be fully removed due to its inherent ambiguity.
+Initialisation with a raw `NamedTuple` will still be supported (it will simply be wrapped in `InitFromParams()`); but we expect to remove this eventually, so it will be more future-proof to use `InitFromParams()` directly.
+:::
+
+## Saving and resuming sampling
+
+`resume_from` and `initial_state`
+
+::: {.callout-note}
+## Initial states versus initial parameters
+
+...
+:::
+
+## Thinning and warmup
+
+`num_warmup`
+
+`thinning`
+
+`discard_initial`
