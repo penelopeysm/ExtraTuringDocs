@@ -9,7 +9,7 @@ book:
     - index.qmd
     - src/ad.qmd
     - src/linear.qmd
-    - src/sample.qmd
+    - src/model.qmd
 
 format:
   html:
